@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#05070a">
+<title>IDENTIFY 2.0 · 网页资源识别与按类型原尺寸导出</title>
+<meta name="description" content="输入任意网址，识别页面中的文字、图片、视音频、文档、字体、样式表与压缩包，按类型打包导出原始字节文件。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%2305070a'/><circle cx='16' cy='16' r='9' fill='none' stroke='%23b8ff3c' stroke-width='2'/><circle cx='16' cy='16' r='2.4' fill='%234ad9ff'/></svg>">
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/console.css">
+<link rel="stylesheet" href="css/results.css">
+</head>
+<body data-mode="idle">
+<canvas id="radar-bg" aria-hidden="true"></canvas>
+<div class="layer-vignette" aria-hidden="true"></div>
+<div class="layer-grain" aria-hidden="true"></div>
+<div class="cursor-ring" aria-hidden="true"></div>
+<div class="cursor-dot" aria-hidden="true"></div>
+
+<div class="shell">
+
+  <header class="brand">
+    <div class="mark">
+      <b id="wordmark">IDENTIFY</b>
+      <s>2.0 / resource scanner</s>
+    </div>
+    <div class="tagline">
+      <span class="live">在线解析引擎 <i id="engine-state">ready</i></span>
+      <span>零依赖服务端 <i>node</i></span>
+      <span>导出保真 <i>byte-exact</i></span>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>
+        <span data-scramble="识别">识别</span><span class="thin">／</span><span data-scramble="原样带走">原样带走</span>
+      </h1>
+      <p class="sub reveal">输入一个网址，扫描台会解析页面结构、递归外链样式表、读取每一个资源的真实字节：
+        像素尺寸、码率时长、MIME 与魔数一并列出。选中后按类型打包，导出的文件与站点返回值逐字节一致。</p>
+    </section>
+
+    <section class="console reveal">
+      <form class="command" id="command" autocomplete="off">
+        <div class="field">
+          <span class="proto">URL</span>
+          <input id="url" type="text" spellcheck="false" placeholder="https://example.com 或 http://127.0.0.1:4620/samples/lab" aria-label="要解析的网站链接">
+          <button type="button" class="clear" id="clear-url" title="清空">×</button>
+        </div>
+        <button type="submit" class="ignite" id="ignite">
+          <span class="label">开始扫描</span>
+          <span class="hint">ENTER</span>
+          <span class="shine"></span>
+        </button>
+      </form>
+
+      <div class="opts">
+        <label class="switch hl"><input type="checkbox" id="opt-icons"><span class="track"></span><span>扫描 UI 图标（favicon、图标精灵、小尺寸图）</span></label>
+        <label class="switch hl"><input type="checkbox" id="opt-tech"><span class="track"></span><span>扫描技术资源（字体、样式表、脚本、数据）</span></label>
+        <label class="switch"><input type="checkbox" id="opt-deep" checked><span class="track"></span><span>递归解析外链 CSS（含 @font-face / @import）</span></label>
+        <label class="switch" style="opacity:.9"><span class="stepper" role="group" aria-label="站内顺带扫描页数"><button type="button" data-step="-1">−</button><span id="opt-crawl">0</span><button type="button" data-step="1">+</button></span><span>页顺带扫描站内链接</span></label>
+        <label class="switch"><input type="checkbox" id="opt-infer" checked><span class="track"></span><span>采纳脚本/JSON 中的推断地址</span></label>
+        <div class="opts-note">默认只识别内容资源：图标与技术资源<b>不请求、不下载、不导出</b>。</div>
+        <div class="presets" id="presets"></div>
+      </div>
+
+      <div class="scope" id="scope">
+        <div class="reticle">
+          <svg viewBox="0 0 108 108" aria-hidden="true">
+            <circle class="ring spin" cx="54" cy="54" r="48" fill="none" stroke="rgba(74,217,255,.25)" stroke-width="1" stroke-dasharray="6 10"/>
+            <circle class="ring spin-rev" cx="54" cy="54" r="38" fill="none" stroke="rgba(184,255,60,.3)" stroke-width="1" stroke-dasharray="3 9"/>
+            <circle cx="54" cy="54" r="27" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="1"/>
+            <g class="sweep"><path d="M54 54 L54 6 A48 48 0 0 1 88 21 Z" fill="url(#sg)"/></g>
+            <defs><linearGradient id="sg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="rgba(184,255,60,.5)"/><stop offset="1" stop-color="rgba(184,255,60,0)"/></linearGradient></defs>
+            <path d="M54 40 v-8 M54 68 v8 M40 54 h-8 M68 54 h8" stroke="rgba(255,255,255,.25)" stroke-width="1"/>
+          </svg>
+          <div class="pct" id="scope-pct">0%</div>
+        </div>
+        <div class="scope-body">
+          <div class="scope-phase"><span id="scope-phase">待命</span><span class="target" id="scope-target"></span></div>
+          <div class="bar"><i id="scope-bar"></i></div>
+          <div class="counters">
+            <div class="counter"><b id="c-found">0</b><span>已识别</span></div>
+            <div class="counter"><b id="c-refs">0</b><span>页面引用</span></div>
+            <div class="counter"><b id="c-text">0</b><span>文案段落</span></div>
+            <div class="counter"><b id="c-size">0</b><span>累计体积</span></div>
+          </div>
+          <div class="stream" id="stream"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="results" id="results" hidden>
+      <aside class="spectre">
+        <div class="ov">
+          <div class="big"><span id="ov-total">0</span><s>项</s></div>
+          <div class="pie" id="ov-pie"></div>
+          <dl class="kv" id="ov-kv"></dl>
+        </div>
+        <div>
+          <h3>类型光谱 / spectrum</h3>
+          <div id="spectre-list"></div>
+        </div>
+        <div>
+          <h3>扫描策略 / policy</h3>
+          <div id="policy-box"><div class="spec-empty">等待扫描</div></div>
+        </div>
+        <div>
+          <h3>来源主机 / hosts</h3>
+          <div class="host-list" id="host-list"></div>
+        </div>
+      </aside>
+
+      <div class="stage">
+        <div class="tabs" id="tabs"></div>
+        <div class="toolbar">
+          <label class="search">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="7" cy="7" r="5"/><path d="M11 11 L15 15"/></svg>
+            <input id="filter" type="search" placeholder="筛选名称 / 类型 / 主机" spellcheck="false">
+          </label>
+          <div class="seg" id="view-seg">
+            <button data-view="grid" class="on">网格</button>
+            <button data-view="list">列表</button>
+          </div>
+          <div class="seg" id="sort-seg">
+            <button data-sort="index" class="on">出现顺序</button>
+            <button data-sort="size">体积</button>
+            <button data-sort="pixels">像素</button>
+            <button data-sort="type">类型</button>
+          </div>
+          <label class="switch"><input type="checkbox" id="only-selected"><span class="track"></span><span>只看已选</span></label>
+          <label class="switch"><input type="checkbox" id="only-ok"><span class="track"></span><span>隐藏失效</span></label>
+          <label class="switch" id="only-original-wrap" hidden><input type="checkbox" id="only-original"><span class="track"></span><span>只留同族原件</span></label>
+          <span class="tool-note" id="tool-note"></span>
+        </div>
+        <div id="stage-body"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>IDENTIFY 2.0 · 本地解析服务 · 不上传任何数据到第三方</span>
+    <span>快捷键 <span class="kbd">/</span> 定位 <span class="kbd">↵</span> 扫描 <span class="kbd">A</span> 全选 <span class="kbd">E</span> 导出 <span class="kbd">Esc</span> 关闭</span>
+  </footer>
+</div>
+
+<div class="dock" id="dock">
+  <span class="cnt"><b id="dock-count">0</b> 项 · <span id="dock-size">0 B</span></span>
+  <span class="sep"></span>
+  <button class="dbtn" id="export-type">按类型导出 ZIP<span class="t">E</span></button>
+  <button class="dbtn" id="export-all">导出全部</button>
+  <div class="more">
+    <button class="dbtn ghost" id="more-btn">⋯</button>
+    <div class="drawer" id="drawer">
+      <h4>导出方案</h4>
+      <div class="rows" id="drawer-rows"></div>
+      <div class="hint-line" id="drawer-hint">ZIP 内文件按类型分目录，附带 _manifest.json 与 _资源清单.csv；每个文件保持站点返回的原始字节。</div>
+    </div>
+  </div>
+  <span class="sep"></span>
+  <button class="dbtn ghost" id="clear-sel">清空选择</button>
+</div>
+
+<div class="busy-veil" id="busy-veil">
+  <div class="busy-card">
+    <div class="orbit"><i></i><i></i></div>
+    <div class="title" id="busy-title">正在打包</div>
+    <div class="bytes"><span id="busy-bytes">0</span><s id="busy-unit">B</s></div>
+    <div class="busy-bar"><i id="busy-bar"></i></div>
+    <div class="foot" id="busy-foot">连接解析服务…</div>
+  </div>
+</div>
+
+<div class="modal" id="modal"><div class="sheet" id="sheet"></div></div>
+<div class="toasts" id="toasts"></div>
+<iframe name="dl-frame" id="dl-frame" title="download" style="display:none"></iframe>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

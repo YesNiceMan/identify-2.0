@@ -1,0 +1,14 @@
+{
+  "name": "identify",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "IDENTIFY · 网页资源识别与按类型原尺寸导出控制台",
+  "engines": { "node": ">=18.17" },
+  "scripts": {
+    "start": "node server/index.mjs",
+    "dev": "node --watch server/index.mjs",
+    "samples": "node scripts/make-samples.mjs",
+    "prestart": "node scripts/make-samples.mjs --quiet"
+  }
+}

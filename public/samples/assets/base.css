@@ -1,0 +1,4 @@
+.lab-quote{border-left:3px solid #b8ff3c;padding-left:1rem}
+.lab-figure{margin:0}
+/* 通过 @import 引入第二层样式，检验深度扫描 */
+@import url('layer-2.css');

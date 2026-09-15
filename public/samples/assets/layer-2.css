@@ -1,0 +1,3 @@
+.lazy-card{background-image:url(../assets/grid-1200x800.png);background-size:cover}
+@font-face{font-family:"Noto Serif SC";src:url(https://fonts.gstatic.com/s/notoserifsc/v22/H4chBXePl9DZ0Xe7gG9bcOa9IovDXThXkr8c0egL.woff2) format("woff2");font-weight:400}
+.watermark{background:url(../assets/dot-64.png) repeat}

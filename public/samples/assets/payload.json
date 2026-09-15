@@ -1,0 +1,22 @@
+{
+  "project": "IDENTIFY",
+  "version": "2.0.0",
+  "assets": {
+    "hero": "assets/grid-1200x800.png",
+    "badge": "assets/badge-512.png",
+    "audio": "assets/blip-mono.wav"
+  },
+  "lazy": {
+    "poster": "assets/aurora-1920x1080.png"
+  },
+  "nested": {
+    "list": [
+      {
+        "file": "assets/inventory.csv"
+      },
+      {
+        "file": "assets/specimen.pdf"
+      }
+    ]
+  }
+}

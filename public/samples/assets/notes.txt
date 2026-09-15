@@ -1,0 +1,3 @@
+IDENTIFY 2.0 plain-text specimen.
+
+原始大小导出：字节数、MD5 与站点返回值一致。
