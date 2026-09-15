@@ -360,6 +360,8 @@ function applyResult(result, status) {
   state.pages = result.pages || [];
   putItems(result.resources || []);
   state.filtered = result.filtered || [];
+  state.filteredTotal = result.filteredTotal || state.filtered.length;
+  state.filteredOverflow = result.filteredOverflow || 0;
   putTexts(result.textBlocks || []);
   state.stats = result.stats || null;
   const fam = state.stats && state.stats.families;
@@ -389,7 +391,8 @@ function applyResult(result, status) {
   }
   const extra = [];
   if (t.bad) extra.push('<span style="color:#ffd166">' + t.bad + ' 项不可达</span>');
-  if (state.filtered.length) extra.push('<span style="color:var(--muted)">按策略排除 ' + fmtNum(state.filtered.length) + ' 项</span>');
+  if (state.filteredTotal) extra.push('<span style="color:var(--muted)">按策略排除 ' + fmtNum(state.filteredTotal) + ' 项'
+    + (state.stats && state.stats.requests ? '（其中 ' + fmtNum(state.stats.requests.probed || 0) + ' 项做过探测）' : '') + '</span>');
   if (result.stats && result.stats.families && result.stats.families.collapsed) extra.push('同族缩略 ' + result.stats.families.collapsed + ' 个');
   if (t.texts) extra.push(fmtNum(t.chars) + ' 字文案');
   toast('识别完成 · <b>' + fmtNum(t.total) + '</b> 项 · ' + bytesText(t.bytes) + ' · ' + fmtMs((result.stats && result.stats.duration) || 0)

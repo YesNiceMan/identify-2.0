@@ -13,6 +13,8 @@ export const state = {
   links: [],
   pages: [],
   stats: null,
+  filteredTotal: 0,
+  filteredOverflow: 0,
   sel: new Set(),
   selText: new Set(),
   filter: { type: 'all', q: '', onlySel: false, onlyOk: false, onlyOriginal: false },
@@ -53,6 +55,8 @@ export function reset() {
   state.links = [];
   state.pages = [];
   state.stats = null;
+  state.filteredTotal = 0;
+  state.filteredOverflow = 0;
   state.sel.clear();
   state.selText.clear();
   state.byId = new Map();
@@ -116,7 +120,10 @@ export function visibleItems() {
     /* 「只留同族原件」：把同一张图的缩略 / 低密度写法收起来（没有同族的条目不受影响） */
     if (f.onlyOriginal && r.familySize > 1 && !r.familyBest) return false;
     if (q) {
-      const hay = (r.name + ' ' + r.url + ' ' + r.type + ' ' + (r.host || '') + ' ' + (r.mime || '') + ' ' + (r.alt || '') + ' ' + (r.provenance || '') + ' ' + (r.format || '') + ' ' + (r.codec || '')).toLowerCase();
+      const hay = (r.name + ' ' + r.url + ' ' + r.type + ' ' + (r.host || '') + ' ' + (r.mime || '') + ' ' + (r.alt || '')
+        + ' ' + (r.provenance || '') + ' ' + (r.format || '') + ' ' + (r.codec || '') + ' ' + (r.title || '') + ' ' + (r.creator || '')
+        + ' ' + (r.album || '') + ' ' + (r.genre || '') + ' ' + (r.fontName || '') + ' ' + (r.family || '') + ' ' + (r.camera || '')
+        + ' ' + (r.kind || '') + ' ' + (r.flavor || '') + ' ' + (r.docInfo || '') + ' ' + (r.playlistInfo || '') + ' ' + (r.pageSize || '')).toLowerCase();
       if (hay.indexOf(q) < 0) return false;
     }
     return true;

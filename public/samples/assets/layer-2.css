@@ -1,3 +1,10 @@
 .lazy-card{background-image:url(../assets/grid-1200x800.png);background-size:cover}
+/** 精灵图：靠 background-position 偏移取格，属于界面装饰 */
+.tab-icon{display:inline-block;width:48px;height:48px;background:url(../assets/ui-strip.png) no-repeat;background-position:0 -48px}
+/** 无扩展名内容图：只能靠魔数与内容线索识别 */
+.feature{height:200px;background:url(../assets/feature-image-no-extension) center/cover}
+/** 统计打点：1×1 透明图 */
+.beacon{position:absolute;width:1px;height:1px;background:url(../assets/spacer.gif)}
+.hero-noext{background-image:image-set(url(../assets/feature-image-no-extension) 1x),url(../assets/badge-512.png)}
 @font-face{font-family:"Noto Serif SC";src:url(https://fonts.gstatic.com/s/notoserifsc/v22/H4chBXePl9DZ0Xe7gG9bcOa9IovDXThXkr8c0egL.woff2) format("woff2");font-weight:400}
 .watermark{background:url(../assets/dot-64.png) repeat}

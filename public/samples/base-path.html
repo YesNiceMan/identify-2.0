@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>base href 解析样本 · IDENTIFY</title>
+<base href="/samples/assets/">
+</head><body>
+<h1>&lt;base href&gt; 解析样本</h1>
+<p>本页所有相对地址都应以 <code>/samples/assets/</code> 为基准解析。</p>
+<img src="badge-512.png" alt="徽章（相对 base）">
+<img src="../lab.html" alt="指回样本页的非图片地址">
+<img src="icons/ui-check-16x16.svg" width="16" height="16" alt="图标">
+<img srcset="badge-96.png 96w, badge-512.png 512w" sizes="300px" src="badge-96.png" alt="srcset 相对 base">
+<img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiIGZpbGw9IiM0YWQ5ZmYiLz48L3N2Zz4=;base64x 1x, badge-96.png 2x" alt="data-uri srcset">
+<link rel="stylesheet" href="base.css">
+<div data-setup='{"cover":"aurora-1920x1080.png","strip":"ui-strip.png"}'></div>
+<a href="report.pdf" download>report.pdf</a>
+</body></html>

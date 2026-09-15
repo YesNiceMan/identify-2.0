@@ -1,0 +1,25 @@
+{
+  "name": "IDENTIFY 样本馆",
+  "short_name": "Lab",
+  "start_url": "/samples/lab",
+  "display": "standalone",
+  "background_color": "#05070a",
+  "theme_color": "#b8ff3c",
+  "icons": [
+    {
+      "src": "/samples/assets/icons/ui-check-16x16.svg",
+      "sizes": "16x16",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "/samples/assets/badge-96.png",
+      "sizes": "96x96",
+      "type": "image/png"
+    },
+    {
+      "src": "/samples/assets/badge-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

@@ -7,6 +7,8 @@
 <meta name="generator" content="make-samples.mjs">
 <link rel="icon" href="assets/dot-64.png">
 <link rel="apple-touch-icon" href="assets/badge-96.png">
+<link rel="mask-icon" href="assets/icons/ui-check-16x16.svg" color="#b8ff3c">
+<link rel="manifest" href="assets/site.webmanifest">
 <link rel="stylesheet" href="assets/base.css">
 <link rel="preconnect" href="https://fonts.gstatic.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&display=swap">
@@ -82,6 +84,27 @@ ul{padding-left:1.2rem}
 <li><a href="assets/missing-404.png">missing-404.png · 故意失效的引用</a></li>
 <li><a href="https://example.com/never-heard-of-it.webp">外站不存在的 webp</a></li>
 </ul>
+<h2>界面装饰与技术资源（默认不扫描）</h2>
+<p>下面这些引用会进入「排除明细」：1×1 打点、16×16 界面图标、CSS 精灵图，以及字体 / 样式表 / 脚本 / 数据。样式表本身仍会被读取，以便取出其中真正的图片。</p>
+<div class="chrome-strip">
+<img src="assets/spacer.gif" width="1" height="1" alt="1×1 占位">
+<img src="assets/icons/ui-check-16x16.svg" width="16" height="16" alt="对勾图标">
+<span class="tab-icon" aria-hidden="true"></span>
+<span class="beacon"></span>
+</div>
+<div class="feature" title="无扩展名内容图"></div>
+<h2>深度解析样本</h2>
+<ul>
+<li><a href="assets/report.pdf" download>report.pdf · 两页 / 带信息字典的 PDF</a></li>
+<li><a href="assets/master.m3u8" download>master.m3u8 · HLS 主清单（4 档清晰度）</a></li>
+<li><a href="assets/1080p-index.m3u8" download>1080p-index.m3u8 · HLS 分片清单</a></li>
+<li><a href="assets/master.mpd" download>master.mpd · DASH 清单（自适应码率）</a></li>
+<li><a href="assets/tagged.mp3" download>tagged.mp3 · 带 ID3v2 标签的音频</a></li>
+<li><a href="assets/icon-glyphs.ttf" download>icon-glyphs.ttf · 图标字体（需打开「技术资源」）</a></li>
+<li><a href="base-path.html">base-path.html · &lt;base href&gt; 相对地址解析</a></li>
+</ul>
+<audio src="assets/tagged.mp3" controls preload="metadata"></audio>
+<div data-setup='{"image":"assets/aurora-1920x1080.png","poster":"assets/badge-512.png","clip":"assets/master.m3u8"}'></div>
 <h2>表格与结构</h2>
 <table><caption>导出策略对照</caption><thead><tr><th>类型</th><th>导出单位</th><th>是否保持原始字节</th></tr></thead><tbody>
 <tr><td>图片</td><td>单个文件</td><td>是</td></tr>

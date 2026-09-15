@@ -10,6 +10,12 @@
  *  文档：PDF、OOXML、OLE2、RTF、ZIP / RAR / 7z / gz / xz / tar、WebVTT、SRT、HLS、SQLite、WASM
  */
 
+import zlib from 'node:zlib';
+import {
+  mp4Info as mp4Boxes, aviInfo as aviParse, flvInfo as flvParse, id3Tags,
+  fontInfo as fontParse, icnsInfo as icnsParse, ddsInfo, exrInfo, pnmInfo, tgaInfo, qoiInfo,
+} from './containers.mjs';
+
 const u16le = (b, p) => (p + 1 < b.length ? b[p] | (b[p + 1] << 8) : 0);
 const u16be = (b, p) => (p + 1 < b.length ? (b[p] << 8) | b[p + 1] : 0);
 const u32le = (b, p) => (p + 3 < b.length ? ((b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0) : 0);
@@ -86,6 +92,29 @@ export function imageDimensions(buffer, mime = '') {
     if (ascii(buffer, 0, 4) === 'II*\x00' || ascii(buffer, 0, 4) === 'MM\x00*') return tiffInfo(buffer);
     if (ascii(buffer, 0, 4) === '8BPS') return { width: u32be(buffer, 16), height: u32be(buffer, 20), bitDepth: u16be(buffer, 24) };
     if (ascii(buffer, 0, 12) === '\x00\x00\x00\x0cjP  \x0d\x0a\x87\x0a') return jpeg2000Size(buffer);
+    const qoi = qoiInfo(buffer);
+    if (qoi) return qoi;
+    const dds = ddsInfo(buffer);
+    if (dds) return dds;
+    const exr = exrInfo(buffer);
+    if (exr) return exr;
+    if (ascii(buffer, 0, 4) === 'icns') {
+      const ic = icnsParse(buffer);
+      if (ic) return ic;
+    }
+    const pnm = pnmInfo(buffer);
+    if (pnm) return pnm;
+    if (/tga|x-tga|ega-i8/i.test(String(mime))) {
+      const tga = tgaInfo(buffer);
+      if (tga) return tga;
+    }
+    if (buffer[0] === 0x1f && buffer[1] === 0x8b) {
+      const z = gunzipHead(buffer);
+      if (z) {
+        const r = imageDimensions(z, mime);
+        if (r) { r.transport = 'gzip'; return r; }
+      }
+    }
     const text = String(buffer.subarray(0, Math.min(buffer.length, 12000)).toString('utf-8'));
     if (/svg/i.test(String(mime)) || /^\s*(<\?xml|<svg|<!--)/i.test(text)) return svgInfo(text);
     const box = ascii(buffer, 4, 4);
@@ -122,6 +151,17 @@ function pngInfo(b) {
       out.plays = u32be(b, p + 12);
     } else if (type === 'tRNS') {
       out.alpha = true;
+    } else if (type === 'sRGB') {
+      out.colorSpace = ({ 0: '默认', 1: 'sRGB', 2: 'Linear RGB', 3: 'RGB' })[b[p + 8]] || 'sRGB';
+    } else if (type === 'iCCP') {
+      out.colorSpace = 'ICC ' + ascii(b, p + 8, Math.min(24, len - 1)).split('\x00')[0];
+    } else if (type === 'bKGD') {
+      out.background = true;
+    } else if (type === 'fcTL' && out.animated) {
+      const num = u32be(b, p + 20);
+      const den = u32be(b, p + 24) || 100;
+      out.duration = Math.round(((out.duration || 0) + num / den) * 100) / 100;
+      if (u32be(b, p + 8) === 0 && u32be(b, p + 12) === 0) out.firstFrame = true;
     } else if (type === 'pHYs') {
       const unit = b[p + 16];
       if (unit === 1) out.dpi = Math.round(u32be(b, p + 8) * 0.0254);
@@ -136,7 +176,15 @@ function pngInfo(b) {
 }
 
 function gifInfo(b) {
-  const out = { width: u16le(b, 6), height: u16le(b, 8) };
+  const out = { width: u16le(b, 6), height: u16le(b, 8), version: ascii(b, 3, 3) };
+  let loop = -1;
+  for (let i = 0; i + 19 < b.length; i++) {
+    if (b[i] === 0x21 && b[i + 1] === 0xff && ascii(b, i + 3, 11) === 'NETSCAPE2.0') {
+      if (b[i + 16] === 1) loop = u16le(b, i + 17);
+      break;
+    }
+  }
+  if (loop >= 0) out.loops = loop === 0 ? '无限' : loop + ' 次';
   let frames = 0;
   let delay = 0;
   let transparent = false;
@@ -157,6 +205,35 @@ function gifInfo(b) {
   return out;
 }
 
+/**
+ * 动图 WebP 的动画块：ANIM 里的循环次数 + 每个 ANMF 的 24 位帧时长（毫秒）累加。
+ * 只走 RIFF 块表，不碰压缩数据。
+ */
+function webpAnim(b) {
+  const out = { loop: undefined, duration: 0, keyframes: 0, frames: 0 };
+  let p = 12;
+  let guard = 0;
+  while (p + 8 <= b.length && guard++ < 4000) {
+    const id = ascii(b, p, 4);
+    const size = u32le(b, p + 4);
+    const body = p + 8;
+    if (size < 0 || body > b.length) break;
+    if (id === 'ANIM' && body + 6 <= b.length) out.loop = u16le(b, body + 4);
+    else if (id === 'ANMF' && body + 15 <= b.length) {
+      out.frames++;
+      const ms = b[body + 12] | (b[body + 13] << 8) | (b[body + 14] << 16);
+      out.duration += ms;
+      /** 末字节：高 6 位保留，bit1 = disposal（1=画回底色），bit0 = blending（1=不混合） */
+      const flagsByte = b[body + 15];
+      if (!(flagsByte & 0x02)) out.keyframes++;
+      if (flagsByte & 0x02) out.resetFrame = true;
+      if (flagsByte & 0x01) out.overwrite = true;
+    }
+    p = body + size + (size & 1);
+  }
+  return out;
+}
+
 function webpInfo(b) {
   const chunk = ascii(b, 12, 4);
   if (chunk === 'VP8X') {
@@ -168,7 +245,14 @@ function webpInfo(b) {
     if (flags & 0x10) out.alpha = true;
     if (flags & 0x02) {
       out.animated = true;
-      out.frames = 1 + (b[30] | (b[31] << 8) | (b[32] << 16));
+      const anim = webpAnim(b);
+      /** 帧数只能数 ANMF 块：VP8X 头里并没有帧数字段 */
+      out.frames = anim.frames || 1 + (b[30] | (b[31] << 8) | (b[32] << 16));
+      if (anim.loop !== undefined) out.loops = anim.loop === 0 ? '无限' : anim.loop + ' 次';
+      if (anim.duration) out.duration = Math.round(anim.duration) / 100;
+      if (anim.keyframes) out.keyframes = anim.keyframes;
+      if (anim.resetFrame) out.disposal = '每帧复位';
+      if (anim.overwrite) out.overwrite = true;
     }
     return out;
   }
@@ -194,10 +278,18 @@ function jpegInfo(b) {
     if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) { p += 2; continue; }
     if (marker === 0xd9) break;
     const len = u16be(b, p + 2);
-    if (marker === 0xe1 && out.orientation == null) {
-      const o = exifOrientation(b, p + 4, len);
-      if (o) out.orientation = o;
+    if (marker === 0xe1 && out.exifRead !== true) {
+      const ex = exifTags(b, p + 4, len);
+      if (ex) {
+        Object.assign(out, ex);
+        out.exifRead = true;
+      }
     }
+    if (marker === 0xe2 && !out.colorSpace) {
+      if (ascii(b, p + 4, 4) === 'ICC_PROFILE') out.colorSpace = 'ICC 内嵌';
+    }
+    if (marker === 0xfe && !out.comment) out.comment = readText(b, p + 4, 120);
+    if (marker === 0xda) { out.thumbnailOnly = !out.width; break; }
     if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
       const comps = b[p + 9];
       out.width = u16be(b, p + 7);
@@ -215,10 +307,81 @@ function jpegInfo(b) {
   return out.orientation != null ? { orientation: out.orientation, incomplete: true } : null;
 }
 
-/** 从 APP1 段里读 EXIF Orientation（决定浏览器里实际显示方向） */
-function exifOrientation(b, start, len) {
-  if (ascii(b, start, 4) !== 'Exif') return 0;
-  return exifOrientationBlock(b, start + 6, len - 6);
+/** APP1 EXIF：方向、相机、拍摄时间、曝光参数、缩略图与 GPS */
+function exifTags(b, start, len) {
+  if (ascii(b, start, 4) !== 'Exif' || start + 6 >= b.length) return null;
+  const tiff = start + 6;
+  if (tiff + 8 > b.length) return null;
+  const little = ascii(b, tiff, 2) === 'II';
+  const rd16 = little ? u16le : u16be;
+  const rd32 = little ? u32le : u32be;
+  const ifd0 = tiff + rd32(b, tiff + 4);
+  const out = {};
+  const sub = {
+    0x010f: ['cameraMake', 'ascii'], 0x0110: ['cameraModel', 'ascii'], 0x0131: ['software', 'ascii'],
+    0x0112: ['orientation', 'num'], 0x0128: ['unit', 'num'],
+    0x8769: ['_exifIfd', 'num'], 0x8825: ['_gpsIfd', 'num'], 0x0103: ['_compression', 'num'],
+    0x0201: ['_thumbOffset', 'num'], 0x0202: ['_thumbLength', 'num'],
+  };
+  const walk = (at, map, target) => {
+    if (at + 2 > b.length || at < 0) return;
+    const count = rd16(b, at);
+    for (let i = 0; i < count && i < 70; i++) {
+      const e = at + 2 + i * 12;
+      if (e + 12 > b.length) break;
+      const tag = rd16(b, e);
+      const type = rd16(b, e + 2);
+      const n = rd32(b, e + 4);
+      const def = map[tag];
+      if (!def) continue;
+      const sizeOf = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8 };
+      const bytes = (sizeOf[type] || 4) * n;
+      const valAt = bytes <= 4 ? e + 8 : tiff + rd32(b, e + 8);
+      if (def[1] === 'ascii') {
+        const txt = readText(b, valAt, def[0] === 'cameraMake' ? 40 : 60);
+        if (txt) target[def[0]] = txt;
+      } else if (def[1] === 'num') {
+        target[def[0]] = type === 3 ? rd16(b, valAt) : rd32(b, valAt);
+      }
+    }
+  };
+  walk(ifd0, sub, out);
+  const exifIfd = out._exifIfd ? tiff + out._exifIfd : 0;
+  if (exifIfd) {
+    const sub2 = {
+      0x9003: ['dateTimeOriginal', 'ascii'], 0x8827: ['iso', 'num'], 0x829a: ['_shutter', 'rational'],
+      0x8822: ['_aperture', 'rational'], 0x9201: ['_focal35', 'rational'], 0xa434: ['lensModel', 'ascii'],
+      0x920a: ['_flash', 'num'],
+    };
+    const rat = (at) => (at + 7 < b.length ? (rd32(b, at) / (rd32(b, at + 4) || 1)) : 0);
+    const count = rd16(b, exifIfd);
+    for (let i = 0; i < count && i < 70; i++) {
+      const e = exifIfd + 2 + i * 12;
+      if (e + 12 > b.length) break;
+      const tag = rd16(b, e);
+      const type = rd16(b, e + 2);
+      const n = rd32(b, e + 4);
+      const sizeOf = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8 };
+      const bytes = (sizeOf[type] || 4) * n;
+      const valAt = bytes <= 4 ? e + 8 : tiff + rd32(b, e + 8);
+      if (tag === 0x9003) out.dateTimeOriginal = readText(b, valAt, 24);
+      else if (tag === 0xa434) out.lensModel = readText(b, valAt, 60);
+      else if (tag === 0x8827) out.iso = type === 3 ? rd16(b, valAt) : rd32(b, valAt);
+      else if (tag === 0x829a) out.shutter = rat(valAt);
+      else if (tag === 0x8822) out.aperture = rat(valAt);
+      else if (tag === 0x9201) out.focalLength35 = rat(valAt);
+    }
+  }
+  const gpsIfd = out._gpsIfd ? tiff + out._gpsIfd : 0;
+  if (gpsIfd) out.gps = true;
+  if (out._thumbLength > 0) out.thumbnailBytes = out._thumbLength;
+  if (out._compression === 6) out.thumbnailFormat = 'JPEG';
+  for (const k of Object.keys(out)) if (String(k).startsWith('_')) delete out[k];
+  if (out.cameraMake && out.cameraModel) out.camera = (out.cameraMake + ' ' + out.cameraModel).slice(0, 70);
+  delete out.cameraMake; delete out.cameraModel;
+  if (out.shutter) out.shutterLabel = out.shutter >= 1 ? out.shutter.toFixed(1) + 's' : '1/' + Math.round(1 / out.shutter) + 's';
+  if (out.aperture) out.apertureLabel = 'f/' + out.aperture.toFixed(1);
+  return Object.keys(out).length ? out : null;
 }
 
 function exifOrientationBlock(b, tiff, len) {
@@ -293,7 +456,11 @@ function heifSize(b) {
   return w && h ? { width: w, height: h } : null;
 }
 
-function svgInfo(text) {
+function clipText(v, n) {
+  return String(v == null ? '' : v).replace(/<[^>]*>/g, ' ').replace(/&[a-z]+;|&#\d+;/gi, ' ').replace(/\s+/g, ' ').trim().slice(0, n || 160);
+}
+
+function svgInfoRaw(text) {
   const root = /<svg[^>]*>/i.exec(text);
   if (!root) return null;
   const tag = root[0];
@@ -304,8 +471,23 @@ function svgInfo(text) {
     out.symbols = symbols;
     if (symbols >= 2) out.sprite = true;
   }
-  const shapes = (text.match(/<(path|circle|rect|ellipse|polygon|polyline|line|use|image)[\s>/]/gi) || []).length;
+  const count = (re) => (text.match(re) || []).length;
+  const shapes = count(/<(path|circle|rect|ellipse|polygon|polyline|line)[\s>/]/gi);
+  const uses = count(/<use[\s>/]/gi);
+  const images = count(/<image[\s>/]/gi);
+  const texts = count(/<text[\s>/]/gi);
+  const glyphPaths = count(/<(path|rect|circle|ellipse|polygon|polyline|line)[\s>/]/gi);
   if (shapes) out.shapes = shapes;
+  if (uses) out.uses = uses;
+  if (images) out.embeddedImages = images;
+  if (texts) out.textNodes = texts;
+  const title = /<title[^>]*>([\s\S]{1,160}?)<\/title>/i.exec(text);
+  if (title) out.svgTitle = clipText(title[1]);
+  const desc = /<desc[^>]*>([\s\S]{1,200}?)<\/desc>/i.exec(text);
+  if (desc) out.svgDesc = clipText(desc[1]);
+  const stroke = /stroke\s*=\s*["']([^"'n][^"']*)["']/i.exec(text);
+  if (stroke) out.stroke = clipText(stroke[1], 24);
+  out.primitiveCount = glyphPaths + uses;
   const fx = (text.match(/<linearGradient|<radialGradient|<filter[\s>/]/gi) || []).length;
   if (fx) out.effects = fx;
   if (/<animate|<animateTransform|<set[\s>]/i.test(text)) out.animated = true;
@@ -325,6 +507,17 @@ function svgInfo(text) {
   return out;
 }
 
+/** 尺寸算完之后才能判断“像不像一个图标字形” */
+function svgInfo(text) {
+  const out = svgInfoRaw(text);
+  if (!out) return null;
+  const area = (out.width || 0) * (out.height || 0);
+  out.glyphLike = !out.symbols && !out.embeddedImages && (out.primitiveCount || 0) <= 6 && !out.textNodes
+    && !out.effects && (!area || area <= 96 * 96) && !out.animated;
+  if (!out.glyphLike) delete out.glyphLike;
+  return out;
+}
+
 /** 只看文本就能拿到的 SVG 元信息（用于尚未缓存全字节的场合） */
 export function svgMeta(text) {
   try { return svgInfo(String(text || '')); } catch { return null; }
@@ -333,6 +526,7 @@ export function svgMeta(text) {
 /* ----------------------------------------------------------- 视音频 */
 
 export function mediaMeta(buffer, mime = '', url = '', tail) {
+  /* 容器解析优先：MP4/MOV 走盒遍历，AVI / FLV 走各自头部 */
   const out = {};
   const b = buffer;
   if (!b || b.length < 12) return out;
@@ -342,18 +536,53 @@ export function mediaMeta(buffer, mime = '', url = '', tail) {
     if (ascii(b, 0, 4) === 'RIFF' && ascii(b, 8, 4) === 'WAVE') Object.assign(out, wavInfo(b) || {});
     if (ascii(b, 0, 4) === 'FORM' && (ascii(b, 8, 4) === 'AIFC' || ascii(b, 8, 4) === 'AIFF')) Object.assign(out, aiffInfo(b) || {});
     const box = ascii(b, 4, 4);
-    if (box === 'ftyp' || box === 'moov' || /video|mp4|quicktime|mpeg4/i.test(type) || /\.(mp4|m4v|mov|m4a)($|[?#])/.test(name)) {
-      Object.assign(out, compact(mp4Info(b)));
+    if (ascii(b, 0, 4) === 'RIFF' && ascii(b, 12, 4) === 'AVI ') Object.assign(out, compact(aviParse(b)));
+    if (ascii(b, 0, 3) === 'FLV') Object.assign(out, compact(flvParse(b) || {}));
+    if (box === 'ftyp' || box === 'moov' || box === 'styp' || /video|mp4|quicktime|mpeg4|audio\/x-m4a/i.test(type) || /\.(mp4|m4v|mov|m4a|3gp)($|[?#])/.test(name)) {
+      const deep = compact(mp4Boxes(b, tail && tail.length ? tail : null));
+      if (deep.duration || deep.width || deep.tracks || deep.brand || deep.codec) Object.assign(out, deep);
+      else Object.assign(out, compact(mp4Info(b)));
     }
-    if (ascii(b, 0, 4) === '\x1aE\xdf\xa3') Object.assign(out, compact(matroskaInfo(b)));
+    if (ascii(b, 0, 4) === '\x1aE\xdf\xa3') {
+      const mkv = compact(matroskaInfo(b));
+      Object.assign(out, mkv);
+      if (!mkv.width) {
+        const vp8 = vp8KeyframeSize(b);
+        if (vp8) Object.assign(out, vp8);
+      }
+    }
     if (ascii(b, 0, 4) === 'OggS') Object.assign(out, compact(oggInfo(b, tail)));
     if (ascii(b, 0, 4) === 'fLaC') Object.assign(out, compact(flacInfo(b)));
-    if (ascii(b, 0, 3) === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0)) Object.assign(out, compact(mp3Info(b)));
+    if (ascii(b, 0, 3) === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0)) {
+      Object.assign(out, compact(mp3Info(b)));
+      Object.assign(out, compact(id3Tags(b, tail && tail.length ? tail : null)));
+    }
     if (ascii(b, 0, 4) === 'MAC ') out.codec = out.codec || 'APE';
   } catch { /* noop */ }
   if (out.duration != null && !(out.duration > 0 && out.duration < 86400 * 3)) delete out.duration;
   if (/video/.test(type) && !out.width) { /* 只有音频轨 */ }
   return out;
+}
+
+/** gzip 容器（svgz 等）：只解前 512KB */
+function gunzipHead(b) {
+  try { return zlib.gunzipSync(b.subarray(0, Math.min(b.length, 512 * 1024)), { maxOutputLength: 512 * 1024 }); } catch { return null; }
+}
+
+export function fontMeta(buffer, mime = '') {
+  try { return fontParse(buffer, mime) || {}; } catch { return {}; }
+}
+
+/** VP8 关键帧帧头（帧标签后 0x9d 0x01 0x2a + 14bit 宽高） */
+function vp8KeyframeSize(b) {
+  const end = Math.min(b.length - 6, 300000);
+  for (let p = 0; p <= end; p++) {
+    if (b[p] !== 0x9d || b[p + 1] !== 0x01 || b[p + 2] !== 0x2a) continue;
+    const w = (b[p + 3] | (b[p + 4] << 8)) & 0x3fff;
+    const h = (b[p + 5] | (b[p + 6] << 8)) & 0x3fff;
+    if (w > 1 && h > 1 && w < 16384 && h < 16384) return { width: w, height: h, codec: 'VP8' };
+  }
+  return null;
 }
 
 function compact(obj) {
@@ -501,6 +730,14 @@ function matroskaInfo(b) {
         out.width = uintAt(b, data, len);
       } else if (I === 0x55ba && !out.height) {
         out.height = uintAt(b, data, len);
+      } else if (I === 0x7ba) {
+        const s = ascii(b, data, Math.min(len, 120)).replace(/\u0000+$/, '').trim();
+        if (s && !out.title) out.title = s.slice(0, 120);
+      } else if (I === 0x5d) {
+        const s = ascii(b, data, Math.min(len, 80)).replace(/\u0000+$/, '').trim();
+        if (s && !out.writingApp) out.writingApp = s.slice(0, 80);
+      } else if (I === 0xae) {
+        out.tracks = (out.tracks || 0) + 1;
       } else if (I === 0x86) {
         const s = ascii(b, data, Math.min(len, 32)).replace(/\u0000+$/, '');
         if (/^[VASB]_/.test(s) && codecs.indexOf(s) < 0 && codecs.length < 6) {
@@ -817,6 +1054,16 @@ export const SIGNATURES = [
   { test: SIG.ftyp('qt  '), ext: 'mov', mime: 'video/quicktime', type: 'video', label: 'QuickTime 视频' },
   { test: (b) => SIG.ftyp('M4A ')(b) || SIG.ftyp('M4B ')(b), ext: 'm4a', mime: 'audio/mp4', type: 'audio', label: 'M4A 音频' },
   { test: (b) => SIG.ftyp('isom')(b) || SIG.ftyp('mp42')(b) || SIG.ftyp('avc1')(b) || SIG.ftyp('M4V ')(b) || SIG.ftyp('dash')(b) || SIG.ftyp('msdh')(b), ext: 'mp4', mime: 'video/mp4', type: 'video', label: 'MPEG-4 视频' },
+  { test: (b) => ascii(b, 0, 4) === 'qoif', ext: 'qoi', mime: 'image/qoi', type: 'image', label: 'QOI 位图' },
+  { test: (b) => ascii(b, 0, 4) === 'DDS ', ext: 'dds', mime: 'image/vnd-ms.dds', type: 'image', label: 'DirectDraw 贴图（DDS）' },
+  { test: (b) => u32le(b, 0) === 0x01312f76, ext: 'exr', mime: 'image/aces', type: 'image', label: 'OpenEXR 高动态范围图' },
+  { test: (b) => /^P[1-7][\s]/.test(ascii(b, 0, 3)), ext: 'pnm', mime: 'image/x-portable-anymap', type: 'image', label: 'PNM / PBM / PGM / PPM' },
+  { test: (b) => ascii(b, 0, 3) === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0 && b[1] !== 0xff), ext: 'mp3', mime: 'audio/mpeg', type: 'audio', label: 'MPEG 音频（MP3）' },
+  { test: (b) => b[0] === 0x47 && (b[188] === 0x47 || b[188] === 0x00) && b.length > 189, ext: 'ts', mime: 'video/mp2t', type: 'video', label: 'MPEG-TS 传输流' },
+  { test: (b) => b[0] === 0xff && b[1] === 0x0f, ext: 'jxl', mime: 'image/jxl', type: 'image', label: 'JPEG XL 码流' },
+  { test: asciiTest('bplist00'), ext: 'plist', mime: 'application/x-plist', type: 'data', label: '二进制属性列表' },
+  { test: (b) => u32be(b, 0) === 0xfeedfacf || u32be(b, 0) === 0xfeedface, ext: 'macho', mime: 'application/octet-stream', type: 'archive', label: 'Mach-O 可执行文件' },
+  { test: (b) => /<MPD[\s>]/i.test(String(b.subarray(0, 2048).toString('utf-8'))), ext: 'mpd', mime: 'application/dash+xml', type: 'video', label: 'DASH 清单（MPD）' },
   { test: asciiTest('%PDF-'), ext: 'pdf', mime: 'application/pdf', type: 'document', label: 'PDF 文档' },
   { test: SIG.bytes(0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1), ext: 'doc', mime: 'application/msword', type: 'document', label: 'OLE2 复合文档' },
   { test: asciiTest('{\\rtf'), ext: 'rtf', mime: 'application/rtf', type: 'document', label: 'RTF 文档' },

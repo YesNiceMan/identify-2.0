@@ -1,4 +1,6 @@
 .lab-quote{border-left:3px solid #b8ff3c;padding-left:1rem}
+.chrome-strip{display:flex;gap:12px;align-items:center;padding:.6rem;border:1px dashed #1e2733;border-radius:8px}
+.chrome-strip img{width:16px;height:16px}
 .lab-figure{margin:0}
 /* 通过 @import 引入第二层样式，检验深度扫描 */
 @import url('layer-2.css');

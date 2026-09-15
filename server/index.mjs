@@ -73,6 +73,7 @@ function stripPartial(partial) {
   return {
     doc: partial.doc, pages: partial.pages, stats: null,
     resources: partial.resources || [], textBlocks: partial.textBlocks || [],
+    filtered: partial.filtered || [], filteredTotal: partial.filteredTotal || 0, filteredOverflow: partial.filteredOverflow || 0,
     links: partial.links || [], headings: partial.headings || [], keywords: partial.keywords || [],
   };
 }
@@ -279,6 +280,24 @@ async function apiBundle(req, res) {
         path: entryName, name: item.name, url: item.url, type: item.type, mime: item.mime,
         bytes: data.length, reportedBytes: item.size, width: item.width || null, height: item.height || null,
         duration: item.duration || null, signature: item.format || '', status: 'ok',
+        declaredSize: item.declaredWidth ? item.declaredWidth + (item.declaredHeight ? 'x' + item.declaredHeight : '') + (item.declaredFrom ? ' (' + item.declaredFrom + ')' : '') : '',
+        extCorrected: item.extCorrected || '',
+        pages: item.pages || null,
+        page: item.pageWidth ? item.pageWidth + 'x' + item.pageHeight + (item.pageSize ? ' ' + item.pageSize : '') : '',
+        docTitle: item.title || '',
+        docAuthor: item.creator || item.albumArtist || '',
+        album: item.album || '',
+        year: item.year || '',
+        genre: item.genre || '',
+        sampleRate: item.sampleRate || null,
+        channels: item.channels || null,
+        frameRate: item.frameRate || null,
+        codec: item.codec || '',
+        playlist: item.kind ? item.kind + (item.variantCount ? ' · ' + item.variantCount + ' 档' : '') + (item.segments ? ' · ' + item.segments + ' 分片' : '') : '',
+        fonts: item.fontName ? item.fontName + (item.glyphs ? ' · ' + item.glyphs + ' 字形' : '') : '',
+        camera: item.camera || '',
+        sprite: item.sprite || item.symbols ? '精灵图' : '',
+        rescued: item.rescued || '',
       });
     }
     await zip.add(rootName + '/_manifest.json', JSON.stringify(manifest, null, 2));
@@ -370,8 +389,10 @@ function readme(job, items, label) {
   for (const [t, n] of byType) lines.push('  - ' + t + '  ' + n + ' 个');
   lines.push('');
   lines.push('说明：ZIP 内每个文件都是目标站点返回的原始字节（未缩放、未二次编码）。');
-  lines.push('     _manifest.json 与 _资源清单.csv 记录了每个文件的原始 URL、MIME、');
-  lines.push('     像素尺寸、时长等信息，可用于溯源与校验。');
+  lines.push('     _manifest.json 与 _资源清单.csv 记录了每个文件的原始 URL、MIME、像素尺寸、');
+  lines.push('     时长、页数、页面尺寸、文档标题 / 作者、音频标题 / 艺人 / 专辑 / 年份 / 流派、');
+  lines.push('     采样率 / 声道 / 帧率 / 编解码、HLS·DASH 档位、字体家族与字形数、相机 EXIF、');
+  lines.push('     声明尺寸及其来源，可用于溯源与校验。');
   const result = job.result || {};
   const opts = job.options || {};
   lines.push('');
@@ -382,9 +403,12 @@ function readme(job, items, label) {
     if (sum && sum.byReason) for (const g of sum.byReason) lines.push('  - ' + g.label + '  ' + g.count + ' 项');
     lines.push('');
     lines.push('排除明细 :');
-    for (const f of result.filtered.slice(0, 200)) {
-      lines.push('  · [' + f.label + '] ' + (f.name || f.url || '内联') + '  ← ' + (f.detail || f.reason));
+    const shown = result.filtered.slice(0, 240);
+    for (const f of shown) {
+      const est = f.size ? ' · ' + formatBytes(f.size) : f.declaredWidth ? ' · 声明 ' + f.declaredWidth + 'px' : '';
+      lines.push('  · [' + f.label + '] ' + (f.name || f.url || '内联') + est + '  ← ' + (f.detail || f.reason));
     }
+    if (result.filtered.length > shown.length) lines.push('  … 其余 ' + (result.filtered.length - shown.length) + ' 项略');
     lines.push('');
     lines.push('     如需这些资源，回到扫描台打开「UI 图标」「技术资源」两个开关重新扫描。');
   } else {
@@ -394,10 +418,17 @@ function readme(job, items, label) {
 }
 
 function manifestCsv(manifest) {
-  const head = ['序号', '类型', '文件名', '体积(字节)', '宽', '高', '时长(秒)', 'MIME', '原始URL'];
+  const head = [
+    '序号', '类型', '文件名', '体积(字节)', '宽', '高', '时长(秒)', '页数', '页面尺寸', '文档标题', '作者 / 艺人',
+    '专辑', '年份', '流派', '采样率', '声道', '帧率', '编解码', '播放列表', '字体', '相机', '精灵图',
+    '声明尺寸', '声明来源', '地址后缀修正', '识别格式', 'MIME', '原始 URL',
+  ];
   const rows = manifest.files.map((f, i) => [
-    i + 1, f.type || '', f.name || '', f.bytes != null ? f.bytes : (f.size || ''), f.width || '', f.height || '',
-    f.duration || '', f.mime || '', f.url || '',
+    i + 1, (TYPES[f.type] || {}).label || f.type || '', f.name || '', f.bytes != null ? f.bytes : (f.size || ''),
+    f.width || '', f.height || '', f.duration || '', f.pages || '', f.page || '', f.docTitle || '', f.docAuthor || '',
+    f.album || '', f.year || '', f.genre || '', f.sampleRate || '', f.channels || '', f.frameRate || '', f.codec || '',
+    f.playlist || '', f.fonts || '', f.camera || '', f.sprite || '', f.declaredSize || '',
+    f.rescued ? '按内容线索补探测（' + f.rescued + '）' : '', f.extCorrected || '', f.signature || '', f.mime || '', f.url || '',
   ]);
   return '\ufeff' + [head].concat(rows).map((r) => r.map(csvCell).join(',')).join('\r\n');
 }

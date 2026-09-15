@@ -274,16 +274,284 @@ fs.writeFileSync(path.join(ASSETS, 'payload.json'), json);
 const notes = 'IDENTIFY 2.0 plain-text specimen.\n\n原始大小导出：字节数、MD5 与站点返回值一致。\n';
 fs.writeFileSync(path.join(ASSETS, 'notes.txt'), notes);
 
+/* --------------------------------- 策略样本：UI 图标 / 占位像素 / 精灵图 */
+
+const uiIconSvg = ['<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">',
+  '<path d="M2 8l4 4 8-8-1.4-1.4L6 9.2 3.4 6.6z" fill="currentColor"/>', '</svg>'].join('\n');
+fs.mkdirSync(path.join(ASSETS, 'icons'), { recursive: true });
+fs.writeFileSync(path.join(ASSETS, 'icons', 'ui-check-16x16.svg'), uiIconSvg);
+
+/** 1×1 透明 GIF：任何设置下都不该产生请求 */
+const spacer = Buffer.from('R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==', 'base64');
+fs.writeFileSync(path.join(ASSETS, 'spacer.gif'), spacer);
+
+/** 竖向三格精灵图：CSS 用 background-position 偏移定位 */
+const stripPng = encodePng(48, 144, (x, y, w) => {
+  const band = Math.floor(y / 48);
+  const t = x / w;
+  return [clamp(40 + band * 90), clamp(200 - t * 120), clamp(90 + band * 60)];
+});
+fs.writeFileSync(path.join(ASSETS, 'ui-strip.png'), stripPng);
+
+/** 没有扩展名的内容图（只能靠魔数与内容线索识别） */
+const noExt = encodePng(640, 400, (x, y, w, h) => {
+  const u = x / w; const v = y / h;
+  return [clamp(30 + u * 90), clamp(60 + v * 150), clamp(120 + u * 110)];
+});
+fs.writeFileSync(path.join(ASSETS, 'feature-image-no-extension'), noExt);
+
+/* -------------------------------------------------- 自适应码率清单 */
+
+const hlsMaster = ['#EXTM3U', '#EXT-X-VERSION:4',
+  '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="zh",NAME="中文",DEFAULT=YES,AUTOSELECT=YES,URI="subs/zh.m3u8"',
+  '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",LANGUAGE="zh",NAME="普通话",DEFAULT=YES,AUDIO-CHANNELS="2",URI="aud/zh.m3u8"',
+  '#EXT-X-STREAM-INF:BANDWIDTH=6000000,AVERAGE-BANDWIDTH=4800000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2",AUDIO="aud",SUBTITLES="subs"',
+  '1080p/index.m3u8',
+  '#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS="avc1.4d401f,mp4a.40.2",AUDIO="aud",SUBTITLES="subs"',
+  '720p/index.m3u8',
+  '#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=854x480,CODECS="avc1.42e01e,mp4a.40.2",AUDIO="aud",SUBTITLES="subs"',
+  '480p/index.m3u8',
+  '#EXT-X-STREAM-INF:BANDWIDTH=600000,RESOLUTION=426x240,CODECS="avc1.42001e,mp4a.40.2"',
+  '240p/index.m3u8'].join('\n');
+fs.writeFileSync(path.join(ASSETS, 'master.m3u8'), hlsMaster);
+
+const hlsMedia = ['#EXTM3U', '#EXT-X-VERSION:4', '#EXT-X-TARGETDURATION:6', '#EXT-X-MEDIA-SEQUENCE:10482',
+  '#EXT-X-PROGRAM-DATE-TIME:2024-05-01T08:00:00.000Z',
+  '#EXTINF:5.005,', 'seg-10482.ts', '#EXTINF:4.980,', 'seg-10483.ts',
+  '#EXT-X-BYTERANGE:616960@0', '#EXTINF:5.010,', 'seg-10484.ts', '#EXT-X-ENDLIST'].join('\n');
+fs.writeFileSync(path.join(ASSETS, '1080p-index.m3u8'), hlsMedia);
+
+const mpdDoc = ['<?xml version="1.0" encoding="UTF-8"?>',
+  '<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT1M36.5S" minUpdatePeriod="PT2S" profiles="urn:mpeg:dash:profile:isoff-live:2011">',
+  '  <Period id="0" start="PT0S">',
+  '    <AdaptationSet mimeType="video/mp4" segmentAlignment="true" lang="zh" subsegmentAlignment="true">',
+  '      <SegmentTemplate timescale="90000" initialization="v-$RepresentationId$-init.mp4" media="v-$RepresentationId$-$Number$-segmp4" startNumber="1">',
+  '        <SegmentTimeline><S d="180180" r="35"/></SegmentTimeline>',
+  '      </SegmentTemplate>',
+  '      <Representation id="v1080" bandwidth="4800000" width="1920" height="1080" frameRate="30" codecs="avc1.640028"/>',
+  '      <Representation id="v720" bandwidth="2400000" width="1280" height="720" frameRate="30" codecs="avc1.4d401f"/>',
+  '      <Representation id="v480" bandwidth="1100000" width="854" height="480" codecs="avc1.42e01e"/>',
+  '    </AdaptationSet>',
+  '    <AdaptationSet mimeType="audio/mp4" codecs="mp4a.40.2" lang="en" audioSamplingRate="48000">',
+  '      <Representation id="a1" bandwidth="128000"/>',
+  '    </AdaptationSet>',
+  '  </Period>',
+  '</MPD>'].join('\n');
+fs.writeFileSync(path.join(ASSETS, 'master.mpd'), mpdDoc);
+
+/* ------------------------------------------------ 带 Info 字典的 PDF */
+
+function pdfWithInfo(title, author, subject, keywords, producer) {
+  const hex = (txt) => {
+    const le = Buffer.from(String(txt), 'utf16le');
+    const be = Buffer.alloc(le.length);
+    for (let i = 0; i < le.length; i += 2) { be[i] = le[i + 1]; be[i + 1] = le[i]; }
+    return '<FEFF' + be.toString('hex').toUpperCase() + '>';
+  };
+  const objects = [];
+  objects.push('<< /Type /Catalog /Pages 2 0 R /Outlines 7 0 R >>');
+  objects.push('<< /Type /Pages /Kids [3 0 R 8 0 R] /Count 2 >>');
+  objects.push('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>');
+  objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>');
+  const p1 = 'BT /F1 30 Tf 64 760 Td (' + title + ') Tj ET\nBT /F1 12 Tf 64 730 Td (page one of two) Tj ET';
+  objects.push('<< /Length ' + Buffer.byteLength(p1) + ' >>\nstream\n' + p1 + '\nendstream');
+  objects.push('<< /Title ' + hex(title) + ' /Author ' + hex(author) + ' /Subject (resource parsing report) /Keywords ' + hex(keywords)
+    + ' /Creator (make-samples.mjs) /Producer ' + hex(producer || 'IDENTIFY 样本馆') + ' /CreationDate (D:20240501162211+08\'00\') /ModDate (D:20240503091500Z) >>');
+  objects.push('<< /Type /Outlines /First 9 0 R /Last 9 0 R /Count 1 >>');
+  const p2 = 'BT /F1 20 Tf 64 780 Td (second page body) Tj ET';
+  objects.push('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /Font << /F1 4 0 R >> >> /Contents 10 0 R >>');
+  objects.push('<< /Type /OutlineItem /Title ' + hex(title) + ' /Parent 7 0 R /Dest [3 0 R /Fit] >>');
+  objects.push('<< /Length ' + Buffer.byteLength(p2) + ' >>\nstream\n' + p2 + '\nendstream');
+  let out = '%PDF-1.7\n';
+  const offsets = [];
+  objects.forEach((body, i) => { offsets.push(Buffer.byteLength(out)); out += (i + 1) + ' 0 obj\n' + body + '\nendobj\n'; });
+  const xrefStart = Buffer.byteLength(out);
+  out += 'xref\n0 ' + (objects.length + 1) + '\n0000000000 65535 f \n';
+  for (const off of offsets) out += String(off).padStart(10, '0') + ' 00000 n \n';
+  out += 'trailer\n<< /Size ' + (objects.length + 1) + ' /Root 1 0 R /Info 6 0 R >>\nstartxref\n' + xrefStart + '\n%%EOF\n';
+  return Buffer.from(out, 'latin1');
+}
+const reportBuf = pdfWithInfo('IDENTIFY 2.0 资源识别报告', 'DeepSeek Harness', 'resource parsing', 'identify, scan, export', 'IDENTIFY 样本馆打印驱动');
+fs.writeFileSync(path.join(ASSETS, 'report.pdf'), reportBuf);
+log('  PDF  report.pdf' + '             ' + kb(reportBuf.length));
+
+/* ------------------------------------------------------ 带标签的 MP3 */
+
+function id3Frame(id, text) {
+  const body = Buffer.concat([Buffer.from([0x00]), Buffer.from(text, 'latin1')]);
+  const head = Buffer.alloc(10);
+  head.write(id, 0, 'latin1');
+  head.writeUInt32BE(body.length, 4);
+  return Buffer.concat([head, body]);
+}
+function id3v2(frames) {
+  const body = Buffer.concat(frames);
+  const head = Buffer.alloc(10);
+  head.write('ID3', 0, 'latin1');
+  head[3] = 3; head[4] = 0; head[5] = 0;
+  const size = body.length;
+  head[6] = (size >>> 21) & 0x7f; head[7] = (size >>> 14) & 0x7f; head[8] = (size >>> 7) & 0x7f; head[9] = size & 0x7f;
+  return Buffer.concat([head, body]);
+}
+function mp3Frame(count) {
+  const size = 417;
+  const out = Buffer.alloc(count * size);
+  for (let i = 0; i < count; i++) {
+    const at = i * size;
+    out[at] = 0xff; out[at + 1] = 0xfb; out[at + 2] = 0x90; out[at + 3] = 0x44;
+    out[at + size - 1] = 0x7f;
+  }
+  return out;
+}
+const mp3Buf = Buffer.concat([
+  id3v2([
+    id3Frame('TIT2', 'Original Size'),
+    id3Frame('TPE1', 'IDENTIFY Sampler'),
+    id3Frame('TALB', 'Byte Fidelity'),
+    id3Frame('TRCK', '3/12'),
+    id3Frame('TYER', '2024'),
+    id3Frame('TCON', '(17)'),
+    id3Frame('TLEN', '678'),
+    id3Frame('TSSE', 'LAME 3.100'),
+  ]),
+  mp3Frame(26),
+  Buffer.from('TAG' + ' '.repeat(30), 'latin1'),
+]);
+fs.writeFileSync(path.join(ASSETS, 'tagged.mp3'), mp3Buf);
+log('  MP3  tagged.mp3' + '             ' + kb(mp3Buf.length));
+
+/* ---------------------------------------------------- 可解析的 TTF */
+
+function u16(v) { const b = Buffer.alloc(2); b.writeUInt16BE(v & 0xffff); return b; }
+function i16(v) { const b = Buffer.alloc(2); b.writeInt16BE(v | 0); return b; }
+function u32(v) { const b = Buffer.alloc(4); b.writeUInt32BE(v >>> 0); return b; }
+function sfntNameTable(entries) {
+  const records = [];
+  const strings = [];
+  let so = 0; /** 每条记录的 StringOffset 相对存储区起点 */
+  entries.forEach((e) => {
+    const buf = Buffer.from(String(e.value), 'utf16le');
+    const swapped = Buffer.alloc(buf.length);
+    for (let i2 = 0; i2 < buf.length; i2 += 2) { swapped[i2] = buf[i2 + 1]; swapped[i2 + 1] = buf[i2]; }
+    records.push(Buffer.concat([u16(3), u16(1), u16(0x409), u16(e.id), u16(swapped.length), u16(so)]));
+    strings.push(swapped);
+    so += swapped.length;
+  });
+  return Buffer.concat([u16(0), u16(entries.length), u16(6 + entries.length * 12)].concat(records, strings));
+}
+function buildTtf(spec) {
+  const tables = [];
+  const head = Buffer.concat([u32(0x00010000), u32(0x00010000), u32(0), u32(0x5f0f3cf5), u16(0x000b), u16(spec.unitsPerEm),
+    Buffer.alloc(16), i16(spec.xMin), i16(spec.yMin), i16(spec.xMax), i16(spec.yMax), u16(0x0040), u16(8), u16(0), u16(0), u16(0)]);
+  tables.push(['head', head]);
+  const maxp = Buffer.concat([u32(0x00010000), u16(spec.glyphs), u16(0), u16(0), u16(0), u16(0), u16(0), u16(0), u16(0), u16(0), u16(0)]);
+  tables.push(['maxp', maxp.subarray(0, 32)]);
+  const os2 = Buffer.alloc(96);
+  os2.writeUInt16BE(4, 0);
+  os2.writeInt16BE(500, 2);
+  os2.writeUInt16BE(spec.weight, 4);
+  os2.writeUInt16BE(spec.widthClass, 6);
+  os2.writeUInt16BE(0, 8);
+  os2.writeUInt16BE(0x0040, 62);
+  os2.writeUInt16BE(0x0020, 64);
+  os2.writeUInt16BE(0x20ac, 66);
+  os2.writeInt16BE(800, 68);
+  os2.writeInt16BE(-200, 70);
+  os2.writeInt16BE(0, 72);
+  os2.writeUInt16BE(900, 74);
+  os2.writeUInt16BE(220, 76);
+  tables.push(['OS/2', os2]);
+  const post = Buffer.alloc(32);
+  post.writeUInt32BE(0x00030000, 0);
+  post.writeInt32BE(-12 * 65536, 4);
+  tables.push(['post', post]);
+  const name = sfntNameTable(spec.names);
+  tables.push(['name', name]);
+  const num = tables.length;
+  let searchRange = 16; while (searchRange * 2 <= num * 16) searchRange *= 2;
+  const header = Buffer.concat([u32(0x00010000), u16(num), u16(searchRange), u16(Math.round(Math.log2(searchRange / 16))), u16(num * 16 - searchRange)]);
+  const bodyLen = 12 + num * 16;
+  const dirs = [];
+  let off = bodyLen;
+  tables.forEach((t) => {
+    const padded = Math.ceil(t[1].length / 4) * 4;
+    dirs.push(Buffer.concat([Buffer.from(t[0], 'latin1'), u32(0), u32(off), u32(t[1].length)]));
+    off += padded;
+  });
+  const parts = [header].concat(dirs);
+  tables.forEach((t) => {
+    parts.push(t[1]);
+    const pad = Math.ceil(t[1].length / 4) * 4 - t[1].length;
+    if (pad > 0) parts.push(Buffer.alloc(pad));
+  });
+  return Buffer.concat(parts);
+}
+const fontBuf = buildTtf({
+  unitsPerEm: 1000, glyphs: 64, xMin: 0, yMin: -220, xMax: 1200, yMax: 920,
+  weight: 600, widthClass: 5,
+  names: [
+    { id: 1, value: 'Lab Icon Glyphs' },
+    { id: 2, value: 'Semibold' },
+    { id: 4, value: 'Lab Icon Glyphs Semibold' },
+    { id: 6, value: 'LabIconGlyphs-Semibold' },
+    { id: 8, value: 'IDENTIFY Foundry' },
+    { id: 9, value: 'IDENTIFY Foundry' },
+    { id: 11, value: 'SIL Open Font License 1.1' },
+  ],
+});
+fs.writeFileSync(path.join(ASSETS, 'icon-glyphs.ttf'), fontBuf);
+log('  TTF  icon-glyphs.ttf' + '        ' + kb(fontBuf.length));
+
+/** Web App Manifest：属于「数据」，默认不扫描 */
+const manifest = JSON.stringify({
+  name: 'IDENTIFY 样本馆', short_name: 'Lab', start_url: '/samples/lab', display: 'standalone',
+  background_color: '#05070a', theme_color: '#b8ff3c',
+  icons: [
+    { src: '/samples/assets/icons/ui-check-16x16.svg', sizes: '16x16', type: 'image/svg+xml' },
+    { src: '/samples/assets/badge-96.png', sizes: '96x96', type: 'image/png' },
+    { src: '/samples/assets/badge-512.png', sizes: '512x512', type: 'image/png' },
+  ],
+}, null, 2);
+fs.writeFileSync(path.join(ASSETS, 'site.webmanifest'), manifest);
+
+/** <base href> 页面：所有相对地址应以 base 为基准 */
+const basePage = ['<!doctype html>', '<html lang="zh-CN"><head><meta charset="utf-8">',
+  '<title>base href 解析样本 · IDENTIFY</title>',
+  '<base href="/samples/assets/">',
+  '</head><body>',
+  '<h1>&lt;base href&gt; 解析样本</h1>',
+  '<p>本页所有相对地址都应以 <code>/samples/assets/</code> 为基准解析。</p>',
+  '<img src="badge-512.png" alt="徽章（相对 base）">',
+  '<img src="../lab.html" alt="指回样本页的非图片地址">',
+  '<img src="icons/ui-check-16x16.svg" width="16" height="16" alt="图标">',
+  '<img srcset="badge-96.png 96w, badge-512.png 512w" sizes="300px" src="badge-96.png" alt="srcset 相对 base">',
+  '<img src="data:image/svg+xml;base64,' + Buffer.from('<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\"><circle cx=\"12\" cy=\"12\" r=\"10\" fill=\"#4ad9ff\"/></svg>', 'utf-8').toString('base64') + ';base64x 1x, badge-96.png 2x" alt="data-uri srcset">',
+  '<link rel="stylesheet" href="base.css">',
+  `<div data-setup='{"cover":"aurora-1920x1080.png","strip":"ui-strip.png"}'></div>`,
+  '<a href="report.pdf" download>report.pdf</a>',
+  '</body></html>'].join('\n');
+fs.writeFileSync(path.join(OUT, 'base-path.html'), basePage);
+log('  HTML public/samples/base-path.html  ' + kb(Buffer.byteLength(basePage)));
+
 /* --------------------------------------------------------------- CSS */
 
 const baseCss = [
   '.lab-quote{border-left:3px solid #b8ff3c;padding-left:1rem}',
+  '.chrome-strip{display:flex;gap:12px;align-items:center;padding:.6rem;border:1px dashed #1e2733;border-radius:8px}',
+  '.chrome-strip img{width:16px;height:16px}',
   '.lab-figure{margin:0}',
   '/* 通过 @import 引入第二层样式，检验深度扫描 */',
   "@import url('layer-2.css');",
 ].join('\n');
 const layer2 = [
   '.lazy-card{background-image:url(../assets/grid-1200x800.png);background-size:cover}',
+  '/** 精灵图：靠 background-position 偏移取格，属于界面装饰 */',
+  '.tab-icon{display:inline-block;width:48px;height:48px;background:url(../assets/ui-strip.png) no-repeat;background-position:0 -48px}',
+  '/** 无扩展名内容图：只能靠魔数与内容线索识别 */',
+  '.feature{height:200px;background:url(../assets/feature-image-no-extension) center/cover}',
+  '/** 统计打点：1×1 透明图 */',
+  '.beacon{position:absolute;width:1px;height:1px;background:url(../assets/spacer.gif)}',
+  '.hero-noext{background-image:image-set(url(../assets/feature-image-no-extension) 1x),url(../assets/badge-512.png)}',
   '@font-face{font-family:"Noto Serif SC";src:url(https://fonts.gstatic.com/s/notoserifsc/v22/H4chBXePl9DZ0Xe7gG9bcOa9IovDXThXkr8c0egL.woff2) format("woff2");font-weight:400}',
   '.watermark{background:url(../assets/dot-64.png) repeat}',
 ].join('\n');
@@ -335,6 +603,8 @@ function buildPage({ dataPng, dataSvg }) {
     '<meta name="generator" content="make-samples.mjs">',
     '<link rel="icon" href="assets/dot-64.png">',
     '<link rel="apple-touch-icon" href="assets/badge-96.png">',
+    '<link rel="mask-icon" href="assets/icons/ui-check-16x16.svg" color="#b8ff3c">',
+    '<link rel="manifest" href="assets/site.webmanifest">',
     '<link rel="stylesheet" href="assets/base.css">',
     '<link rel="preconnect" href="https://fonts.gstatic.com">',
     '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&display=swap">',
@@ -410,6 +680,27 @@ function buildPage({ dataPng, dataSvg }) {
     '<li><a href="assets/missing-404.png">missing-404.png · 故意失效的引用</a></li>',
     '<li><a href="https://example.com/never-heard-of-it.webp">外站不存在的 webp</a></li>',
     '</ul>',
+    '<h2>界面装饰与技术资源（默认不扫描）</h2>',
+    '<p>下面这些引用会进入「排除明细」：1×1 打点、16×16 界面图标、CSS 精灵图，以及字体 / 样式表 / 脚本 / 数据。样式表本身仍会被读取，以便取出其中真正的图片。</p>',
+    '<div class="chrome-strip">',
+    '<img src="assets/spacer.gif" width="1" height="1" alt="1×1 占位">',
+    '<img src="assets/icons/ui-check-16x16.svg" width="16" height="16" alt="对勾图标">',
+    '<span class="tab-icon" aria-hidden="true"></span>',
+    '<span class="beacon"></span>',
+    '</div>',
+    '<div class="feature" title="无扩展名内容图"></div>',
+    '<h2>深度解析样本</h2>',
+    '<ul>',
+    '<li><a href="assets/report.pdf" download>report.pdf · 两页 / 带信息字典的 PDF</a></li>',
+    '<li><a href="assets/master.m3u8" download>master.m3u8 · HLS 主清单（4 档清晰度）</a></li>',
+    '<li><a href="assets/1080p-index.m3u8" download>1080p-index.m3u8 · HLS 分片清单</a></li>',
+    '<li><a href="assets/master.mpd" download>master.mpd · DASH 清单（自适应码率）</a></li>',
+    '<li><a href="assets/tagged.mp3" download>tagged.mp3 · 带 ID3v2 标签的音频</a></li>',
+    '<li><a href="assets/icon-glyphs.ttf" download>icon-glyphs.ttf · 图标字体（需打开「技术资源」）</a></li>',
+    '<li><a href="base-path.html">base-path.html · &lt;base href&gt; 相对地址解析</a></li>',
+    '</ul>',
+    '<audio src="assets/tagged.mp3" controls preload="metadata"></audio>',
+    `<div data-setup='{"image":"assets/aurora-1920x1080.png","poster":"assets/badge-512.png","clip":"assets/master.m3u8"}'></div>`,
     '<h2>表格与结构</h2>',
     '<table><caption>导出策略对照</caption><thead><tr><th>类型</th><th>导出单位</th><th>是否保持原始字节</th></tr></thead><tbody>',
     '<tr><td>图片</td><td>单个文件</td><td>是</td></tr>',

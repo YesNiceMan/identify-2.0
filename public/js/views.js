@@ -106,12 +106,19 @@ export function renderPolicy() {
     box.appendChild(el('div', { class: 'spec-empty', text: '本次没有排除任何引用' }));
     return;
   }
+  /* 统计口径以服务端为准（明细可能被截断），分组顺序仍按当前可见列表 */
   const byReason = new Map();
   for (const f of list) {
     const g = byReason.get(f.reason) || { reason: f.reason, label: f.label, hint: f.hint, count: 0, bytes: 0, asked: 0 };
     g.count++;
     if (f.size) { g.bytes += f.size; g.asked++; }
     byReason.set(f.reason, g);
+  }
+  const official = (state.stats.filtered && state.stats.filtered.byReason) || [];
+  for (const g of official) {
+    const cur = byReason.get(g.reason);
+    if (cur) { cur.count = g.count; cur.bytes = g.bytes || cur.bytes; cur.asked = g.probed || 0; cur.label = g.label || cur.label; cur.hint = g.hint || cur.hint; }
+    else byReason.set(g.reason, { reason: g.reason, label: g.label, hint: g.hint, count: g.count, bytes: g.bytes || 0, asked: g.probed || 0 });
   }
   const groups = [...byReason.values()].sort((a, b) => b.count - a.count);
   const max = Math.max(1, ...groups.map((g) => g.count));
@@ -125,10 +132,13 @@ export function renderPolicy() {
     wrap.appendChild(row);
   }
   box.appendChild(wrap);
-  const asked = list.filter((f) => f.size != null).length;
+  const total = state.stats.filtered && state.stats.filtered.total ? state.stats.filtered.total : list.length;
+  const asked = groups.reduce((n, g) => n + (g.asked || 0), 0);
+  const overflow = state.filteredOverflow || 0;
   box.appendChild(el('div', {
     class: 'pol-foot',
-    text: '合计排除 ' + list.length + ' 项 · 其中 ' + (list.length - asked) + ' 项在发起请求前就被识别',
+    text: '合计排除 ' + fmtNum(total) + ' 项 · ' + fmtNum(Math.max(0, total - asked)) + ' 项在发起请求前就被识别'
+      + (overflow ? ' · 明细最多展示 ' + list.length + ' 条' : ''),
   }));
   box.appendChild(el('button', { class: 'pol-more', type: 'button', text: '查看全部排除明细 →', onclick: () => H.onPolicy && H.onPolicy('') }));
 }
@@ -255,7 +265,9 @@ function matchesFilter(item) {
   if (f.onlyOk && item.status !== 'ok') return false;
   if (f.onlyOriginal && item.familySize > 1 && !item.familyBest) return false;
   const q = f.q.trim().toLowerCase();
-  if (q && (item.name + ' ' + item.url + ' ' + item.type + ' ' + (item.host || '')).toLowerCase().indexOf(q) < 0) return false;
+  if (q && (item.name + ' ' + item.url + ' ' + item.type + ' ' + (item.host || '') + ' ' + (item.format || '') + ' '
+    + (item.codec || '') + ' ' + (item.title || '') + ' ' + (item.creator || '') + ' ' + (item.fontName || '') + ' '
+    + (item.kind || '') + ' ' + (item.flavor || '') + ' ' + (item.camera || '') + ' ' + (item.pageSize || '')).toLowerCase().indexOf(q) < 0) return false;
   return true;
 }
 
@@ -286,6 +298,10 @@ export function cardNode(item) {
   if (item.sprite) thumb.appendChild(el('span', { class: 'flag sprite', text: '精灵图 ' + (item.symbols || '?') + ' 图' }));
   else if (item.animated) thumb.appendChild(el('span', { class: 'flag anim', text: item.frames ? '动画 ' + item.frames + ' 帧' : '动画' }));
   if (item.familySize > 1) thumb.appendChild(el('span', { class: 'flag fam' + (item.familyBest ? ' best' : ''), text: item.familyBest ? '同族原件 ×' + item.familySize : '同族缩略候选' }));
+  if (item.rescued) thumb.appendChild(el('span', { class: 'flag rescue', title: esc(item.rescued), text: '按内容补探测' }));
+  else if (item.iconFont) thumb.appendChild(el('span', { class: 'flag sprite', text: '图标字体' }));
+  else if (item.encrypted) thumb.appendChild(el('span', { class: 'flag fam', text: '已加密' }));
+  else if (item.live) thumb.appendChild(el('span', { class: 'flag anim', text: '直播流' }));
   const acts = el('div', { class: 'acts' });
   if (item.status === 'ok') {
     acts.appendChild(el('a', { class: 'icon-btn', href: item.inline ? '/api/inline?job=' + state.job + '&id=' + item.id + '&download=1' : downloadSrc(item.url, item.name), title: '下载原始文件', html: '&#8681;' }));
@@ -300,7 +316,11 @@ export function cardNode(item) {
   else metaBits.push('体积未知');
   if (item.width && item.height) metaBits.push(esc(pixels(item.width, item.height)));
   if (item.duration) metaBits.push(esc(fmtDuration(item.duration)));
-  if (item.entries > 1) metaBits.push(item.entries + ' 尺寸');
+  if (item.entries > 1 && item.sizes) metaBits.push(item.entries + ' 尺寸');
+  if (item.pages) metaBits.push(item.pages + ' 页');
+  if (item.kind) metaBits.push(esc(item.kind + (item.variantCount ? ' ×' + item.variantCount : '')));
+  if (item.fontName) metaBits.push(esc(item.fontName));
+  if (item.camera) metaBits.push(esc(item.camera.split(' ')[0]));
   if (item.codec) metaBits.push(esc(item.codec));
   if (item.ext) metaBits.push(esc(item.ext.toUpperCase()));
   if (item.provenance === 'inferred' || item.provenance === 'json') metaBits.push('推断');
@@ -517,9 +537,10 @@ export function detailHtml(item) {
   rows.push(['原始体积', item.size ? bytesText(item.size) + ' (' + fmtNum(item.size) + ' 字节)' : '未知']);
   if (item.width && item.height) rows.push(['像素尺寸', item.width + ' × ' + item.height + ' · ' + ((item.width * item.height) / 1e6).toFixed(2) + ' MP' + (item.vector ? '（矢量按 viewBox 换算）' : '')]);
   if (item.duration) rows.push(['时长', fmtDuration(item.duration)]);
-  if (item.animated) rows.push(['动画', yes((item.frames ? item.frames + ' 帧' : '') + (item.duration ? ' · 循环 ' + fmtDuration(item.duration) : ''))]);
+  if (item.animated) rows.push(['动画', yes([item.frames ? item.frames + ' 帧' : '', item.duration ? '一轮 ' + fmtDuration(item.duration) : '', item.keyframes ? item.keyframes + ' 个关键帧' : '', item.disposal ? '处置：' + item.disposal : '', item.overwrite ? '不混合直接覆盖' : ''].filter(Boolean).join(' · '))]);
+  if (item.transparent) rows.push(['透明', yes('整幅带透明索引')]);
   if (item.sprite) rows.push(['图标精灵', item.symbols + ' 个 symbol（同一片画布上的多个图标）']);
-  if (item.entries > 1) rows.push(['内含尺寸', item.entries + ' 张：' + (item.sizes || '')]);
+  if (item.entries > 1 && item.sizes) rows.push(['内含尺寸', item.entries + ' 张：' + (item.sizes || '')]);
   if (item.bitDepth) rows.push(['位深', item.bitDepth + ' bit' + (item.channels ? ' · ' + item.channels + ' 通道' : '') + (item.alpha ? ' · 带透明通道' : '')]);
   if (item.colorSpace) rows.push(['色彩空间', item.colorSpace + (item.progressive ? ' · 渐进式扫描' : item.baseline ? ' · 顺序扫描' : '')]);
   if (item.interlaced) rows.push(['隔行', 'Adam7 隔行扫描']);
@@ -529,7 +550,85 @@ export function detailHtml(item) {
   if (item.bitrate) rows.push(['码率', fmtNum(Math.round(item.bitrate / 1000)) + ' kbps' + (item.vbr ? '（可变）' : item.cbr ? '（恒定）' : '')]);
   if (item.codec) rows.push(['编码', item.codec]);
   if (item.shapes) rows.push(['矢量元素', item.shapes + ' 个图形' + (item.effects ? ' · ' + item.effects + ' 个渐变 / 滤镜' : '')]);
-  if (item.familySize > 1) rows.push(['同族资源', item.familyBest ? '这是同族中尺寸最大的原件（共 ' + item.familySize + ' 个尺寸写法）' : '与原件同族（原件 ' + item.familySize + ' 个尺寸之一）']);
+  if (item.exifRead) rows.push(['EXIF', '已解析 ' + item.exifRead + ' 项']);
+  if (item.camera) rows.push(['拍摄设备', item.camera + (item.lensModel ? ' · ' + item.lensModel : '')]);
+  if (item.dateTimeOriginal) rows.push(['拍摄时间', item.dateTimeOriginal]);
+  if (item.iso || item.shutterLabel || item.apertureLabel || item.focalLength35) rows.push(['曝光参数', [item.shutterLabel ? '快门 ' + item.shutterLabel : '', item.apertureLabel ? '光圈 ' + item.apertureLabel : '', item.iso ? 'ISO ' + item.iso : '', item.focalLength35 ? '等效 ' + item.focalLength35 + 'mm' : ''].filter(Boolean).join(' · ')]);
+  if (item.gps) rows.push(['GPS', '内嵌经纬度']);
+  if (item.thumbnailOnly) rows.push(['读取范围', '只取到缩略图，主图尺寸待定']);
+  if (item.comment) rows.push(['注释', String(item.comment)]);
+  if (item.tracks) rows.push(['轨道', item.tracks + ' 条' + (item.trackKinds ? '：' + item.trackKinds : '')]);
+  if (item.frameRate) rows.push(['帧率', item.frameRate + ' fps']);
+  if (item.brand) rows.push(['容器', item.brand + (item.compatibleBrands ? ' · 兼容 ' + item.compatibleBrands : '')]);
+  if (item.faststart) rows.push(['流式播放', 'moov 前置（faststart，可边下边播）']);
+  if (item.fragmented) rows.push(['分片封装', 'fMP4 / fragmented']);
+  if (item.edited) rows.push(['编辑列表', item.edited + ' 段']);
+  if (item.chunkOffsets) rows.push(['采样块', fmtNum(item.chunkOffsets) + ' 块' + (item.sttsRun ? ' · ' + item.sttsRun + ' 种帧长' : '')]);
+  if (item.created) rows.push(['创建时间', item.created]);
+  if (item.modified && item.modified !== item.created) rows.push(['修改时间', item.modified]);
+  if (item.container) rows.push(['封装', item.container]);
+  if (item.interleaved) rows.push(['交错存放', '音视频帧交错']);
+  if (item.cover) rows.push(['内嵌封面', (item.cover && item.cover.mime) || '图片']);
+  if (item.title || item.album) {
+    rows.push(['音频标签', [item.title, item.artist, item.album].filter(Boolean).join(' · ')]);
+    const tag = [item.genre, item.year, item.track && item.track !== '/' ? '曲目 ' + item.track : '', item.language].filter(Boolean).join(' · ');
+    if (tag) rows.push(['流派 / 年份', tag]);
+    if (item.tagVersion) rows.push(['标签版本', item.tagVersion]);
+  }
+  if (item.kind) rows.push(['流媒体清单', item.kind + (item.playlistInfo ? ' · ' + item.playlistInfo : '')]);
+  if (item.variantList && item.variantList.length) rows.push(['清晰度档位', item.variantList.join(' / ')]);
+  if (item.segments) rows.push(['分片', fmtNum(item.segments) + ' 片' + (item.segmentDuration ? ' · 每片 ' + item.segmentDuration + ' 秒' : '') + (item.live ? ' · 直播' : '')]);
+  if (item.subtitleTracks) rows.push(['字幕轨', item.subtitleTracks + ' 条' + (item.languages && item.languages.length ? ' · ' + item.languages.join('/') : '')]);
+  if (item.adaptive) rows.push(['自适应码率', '是']);
+  if (item.encrypted) rows.push(['加密', '容器内加密（需密钥解码）']);
+  if (item.pages) rows.push(['页数', fmtNum(item.pages) + ' 页' + (item.pageSize ? ' · ' + item.pageSize : '')]);
+  if (item.pageWidth) rows.push(['页面尺寸', item.pageWidth + ' × ' + item.pageHeight + ' pt']);
+  if (item.docTitle || item.creator) rows.push(['文档信息', [item.docTitle || item.title, item.creator].filter(Boolean).join(' · ')]);
+  if (item.subject) rows.push(['主题', item.subject]);
+  if (item.keywords) rows.push(['关键词', item.keywords]);
+  if (item.producer || item.software) rows.push(['生成工具', [item.producer, item.software].filter(Boolean).join(' · ')]);
+  if (item.forms) rows.push(['表单 / 批注', item.forms + ' 个表单域' + (item.annotations ? ' · ' + item.annotations + ' 条批注' : '')]);
+  if (item.linearized) rows.push(['PDF 优化', '线性化（可边下边看）']);
+  if (item.appended) rows.push(['增量保存', '尾部追加对象']);
+  if (item.incomplete && item.type !== 'image') rows.push(['读取范围', '尾部未完整到达，按已有字节解析']);
+  if (item.flavor) rows.push(['文档结构', String(item.flavor).toUpperCase() + '（' + (item.entries ? fmtNum(item.entries) + ' 个内部文件' : '') + (item.uncompressedBytes ? ' · 解压后 ' + bytesText(item.uncompressedBytes) : '') + '）']);
+  if (item.mediaFiles) rows.push(['包内媒体', item.mediaFiles + ' 个图片 / 音视频']);
+  if (item.words) rows.push(['篇幅', fmtNum(item.words) + ' 词' + (item.paragraphs ? ' · ' + fmtNum(item.paragraphs) + ' 段' : '') + (item.textChars ? ' · ' + fmtNum(item.textChars) + ' 字符' : '')]);
+  if (item.sheets) rows.push(['工作表', fmtNum(item.sheets) + ' 张' + (item.textCells ? ' · ' + fmtNum(item.textCells) + ' 个文本单元格' : '')]);
+  if (item.spine) rows.push(['阅读顺序', item.spine + ' 章' + (item.images ? ' · ' + item.images + ' 张插图' : '')]);
+  if (item.fontName || item.family) {
+    rows.push(['字体', [item.fontName || [item.family, item.style].filter(Boolean).join(' '), item.postscriptName].filter(Boolean).join(' · ')]);
+    const metric = [item.glyphs ? fmtNum(item.glyphs) + ' 字形' : '', item.unitsPerEm ? 'upem ' + item.unitsPerEm : '', item.weightClass ? '字重 ' + item.weightClass : '', item.widthClass ? '宽度类 ' + item.widthClass : '', item.italicAngle ? '斜度 ' + item.italicAngle : ''].filter(Boolean).join(' · ');
+    if (metric) rows.push(['字体度量', metric]);
+    if (item.fontFlavor) rows.push(['字体轮廓', item.fontFlavor + (item.numTables ? ' · ' + item.numTables + ' 张表' : '') + (item.sfntSize ? ' · 展开 ' + bytesText(item.sfntSize) : '')]);
+    if (item.iconFont) rows.push(['图标字体', '是（字形多为界面小图标）']);
+    if (item.colorFont) rows.push(['彩色字体', item.colorFont]);
+    if (item.features) rows.push(['OpenType 特性', item.features]);
+    if (item.embedding) rows.push(['嵌入许可', item.embedding]);
+    if (item.license) rows.push(['授权', item.license]);
+    if (item.designer) rows.push(['设计者', item.designer]);
+  }
+  if (item.declaredFrom && item.declaredWidth) rows.push(['声明尺寸', item.declaredWidth + 'px · ' + item.declaredFrom]);
+  if (item.cdn) rows.push(['图片服务', [item.cdn.p, item.cdn.w || item.cdn.h ? (item.cdn.sq ? (item.cdn.w || item.cdn.h) + 'px 见方' : (item.cdn.w || '?') + '×' + (item.cdn.h || '?')) : '', item.cdn.dpr ? item.cdn.dpr + 'x 密度' : '', item.cdn.q ? '质量 ' + item.cdn.q : '', item.cdn.ext ? '输出 .' + item.cdn.ext : '', item.cdn.inner ? '内层原图' : ''].filter(Boolean).join(' · ')]);
+  if (item.viaProxy) rows.push(['代理内层', hostUrl(item.viaProxy)]);
+  if (item.cssProp) rows.push(['CSS 属性', item.cssProp + (item.imageSet ? ' · image-set' : '')]);
+  if (item.fontFormat) rows.push(['字体格式声明', '@font-face format(' + item.fontFormat + ')']);
+  if (item.metaKey) rows.push(['meta 属性', item.metaKey]);
+  if (item.rescued) rows.push(['补探测理由', item.rescued + '（地址无法直接归类，按内容线索请求）']);
+  if (item.extCorrected) rows.push(['后缀修正', '.' + item.extCorrected + ' → .' + item.ext + '（按真实字节）']);
+  if (item.transport) rows.push(['传输编码', item.transport === 'gzip' ? 'gzip（已解压读取真实字节）' : String(item.transport)]);
+  if (item.loops) rows.push(['循环次数', String(item.loops)]);
+  if (item.dpi) rows.push(['分辨率', fmtNum(item.dpi) + ' DPI']);
+  if (item.lossless) rows.push(['压缩方式', '无损']);
+  if (item.maxVal) rows.push(['通道峰值', String(item.maxVal)]);
+  if (item.mipLevels) rows.push(['Mipmap', item.mipLevels + ' 级' + (item.cubemap ? ' · 立方体' : '') + (item.volume ? ' · 体积纹理' : '') + (item.arraySize > 1 ? ' · 数组 ' + item.arraySize : '')]);
+  if (item.hdr) rows.push(['高动态范围', '是（' + (item.compressed ? '有损压缩' : '未压缩') + '）']);
+  if (item.background) rows.push(['自带背景', item.background]);
+  if (item.embeddedImages) rows.push(['SVG 内嵌位图', item.embeddedImages + ' 张']);
+  if (item.uses) rows.push(['use 引用', item.uses + ' 处']);
+  if (item.textNodes) rows.push(['SVG 文字', item.textNodes + ' 个 <text>（未被栅格化）']);
+  if (item.svgTitle || item.svgDesc) rows.push(['SVG 标题 / 描述', [item.svgTitle, item.svgDesc].filter(Boolean).join(' · ')]);
+  if (item.svgScript) rows.push(['SVG 脚本', '含 <script>，内嵌需谨慎']);  if (item.familySize > 1) rows.push(['同族资源', item.familyBest ? '这是同族中尺寸最大的原件（共 ' + item.familySize + ' 个尺寸写法）' : '与原件同族（原件 ' + item.familySize + ' 个尺寸之一）']);
   rows.push(['MIME', item.mime || '—']);
   rows.push(['格式判定', item.format || '—']);
   rows.push(['来源标签', '<' + (item.tag || '?') + '> ' + (item.attr || '')]);

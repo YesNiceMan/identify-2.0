@@ -1,0 +1,56 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Outlines 7 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 8 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Length 109 >>
+stream
+BT /F1 30 Tf 64 760 Td (IDENTIFY 2.0 Dê∆+•J) Tj ET
+BT /F1 12 Tf 64 730 Td (page one of two) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Title <FEFF004900440045004E005400490046005900200032002E003000208D446E908BC6522B62A5544A> /Author <FEFF0044006500650070005300650065006B0020004800610072006E006500730073> /Subject (resource parsing report) /Keywords <FEFF006900640065006E0074006900660079002C0020007300630061006E002C0020006500780070006F00720074> /Creator (make-samples.mjs) /Producer <FEFF004900440045004E005400490046005900206837672C9986625353709A7152A8> /CreationDate (D:20240501162211+08'00') /ModDate (D:20240503091500Z) >>
+endobj
+7 0 obj
+<< /Type /Outlines /First 9 0 R /Last 9 0 R /Count 1 >>
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /Font << /F1 4 0 R >> >> /Contents 10 0 R >>
+endobj
+9 0 obj
+<< /Type /OutlineItem /Title <FEFF004900440045004E005400490046005900200032002E003000208D446E908BC6522B62A5544A> /Parent 7 0 R /Dest [3 0 R /Fit] >>
+endobj
+10 0 obj
+<< /Length 47 >>
+stream
+BT /F1 20 Tf 64 780 Td (second page body) Tj ET
+endstream
+endobj
+xref
+0 11
+0000000000 65535 f 
+0000000009 00000 n 
+0000000074 00000 n 
+0000000137 00000 n 
+0000000263 00000 n 
+0000000338 00000 n 
+0000000498 00000 n 
+0000001006 00000 n 
+0000001077 00000 n 
+0000001204 00000 n 
+0000001367 00000 n 
+trailer
+<< /Size 11 /Root 1 0 R /Info 6 0 R >>
+startxref
+1465
+%%EOF

@@ -12,6 +12,7 @@
  *              msapplication) · link rel(icon / preload as=…) · data URI · <a href|download>
  */
 import { classify, extFromPath, typeFromExt, typeFromMime, TYPES, KNOWN_EXT_SOURCE } from './mime.mjs';
+import { urlMeta, compactUrlMeta } from './urlmeta.mjs';
 import { normalizeUrl } from './net.mjs';
 
 const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
@@ -32,8 +33,8 @@ const IMPLICIT = {
 
 /** 明确承载地址的属性 */
 const URL_ATTR_OK = /^(src|href|poster|data|xlink:href|background|srcset|imagesrcset|movie|codebase|formaction)$/i;
-/** 懒加载 / 框架写法里的 data-* 属性 */
-const LAZY_ATTR_RE = /^data[-_]?[a-z0-9_-]*?(?:src|srcset|url|uri|image|img|thumb|thumbnail|poster|background|bg|file|download|href|media|video|audio|movie|clip|sound|mp4|mp3|webm|original|orig|lazy|lazyload|echo|preview|cover|full|large|zoom|lightbox|gallery|source|path|attach)(?:[-_]?(?:set|s|2x|1x))?$/i;
+/** 懒加载 / 框架写法里的 data-* 属性（与扫描策略共用一份表） */
+import { LAZY_ATTR_RE } from './lazy-attrs.mjs';
 /** 名字暗示「这是个资源」的其它属性（取值需带已知扩展名才采纳） */
 const HINT_ATTR_RE = /(?:^|[-:._])(?:src|href|url|uri|image|img|thumb|poster|cover|bg|background|file|download|media|source|movie|clip|video|audio|sound|avatar|icon|logo|gallery|zoom|original|preview|attachment|path)$/i;
 /** 永远不当作地址的属性 */
@@ -99,12 +100,25 @@ function newContext(baseUrl) {
     seq: 0,
     nest: '',
     tokens: 0,
-    doc: { title: '', description: '', keywords: '', lang: '', charset: '', canonical: '', ogImage: '', generator: '', themeColor: '', favicon: '' },
+    doc: { title: '', description: '', keywords: '', lang: '', charset: '', canonical: '', ogImage: '', generator: '', themeColor: '', favicon: '', base: '', imageCount: 0 },
   };
 }
 
 function addRef(ctx, ref) {
   if (ctx.nest && ref.attr) ref.attr = ctx.nest + ref.attr;
+  if (ref.url && !ref.dataUri && ref.cdn === undefined) {
+    const m = urlMeta(ref.url);
+    const cm = compactUrlMeta(m);
+    ref.cdn = Object.keys(cm).length ? cm : null;
+    /** 图片代理（Next.js 优化器 / weserv / Photon）：真正的内容在内层地址里 */
+    if (m.inner && !ref.noInner) {
+      addRef(ctx, Object.assign({}, ref, {
+        url: m.inner, noInner: true, cdn: undefined,
+        attr: String(ref.attr || 'src') + '→内层',
+        viaProxy: ref.url,
+      }));
+    }
+  }
   ctx.resources.push(ref);
 }
 
@@ -164,9 +178,23 @@ function frameStart(ctx, stack, tok, lineOf) {
   const doc = ctx.doc;
   const line = lineOf(tok.start);
   const parentTag = (top(stack) || {}).name || '';
+
+  /* <base href> 之后所有相对地址都改用它作基准 */
+  if (lower === 'base') {
+    const href = normalizeUrl(get('href'), ctx.baseUrl);
+    if (href) { ctx.baseUrl = href; doc.base = href; }
+    return;
+  }
   const context = '<' + lower + ' ' + String(tok.raw || '').replace(/\s+/g, ' ').slice(0, 220);
 
   if (lower === 'html') doc.lang = get('lang') || doc.lang;
+
+  /* style="width:24px" 这类内联声明也算「作者说这有多大」，在属性循环之前补进去 */
+  const styleSize = get('style') ? declaredPx(get('style')) : null;
+  if (styleSize) {
+    if (styleSize.w && !get('width')) tok.attrs.push({ name: 'width', value: String(styleSize.w) });
+    if (styleSize.h && !get('height')) tok.attrs.push({ name: 'height', value: String(styleSize.h) });
+  }
 
   for (const a of tok.attrs) {
     const name = a.name;
@@ -179,8 +207,10 @@ function frameStart(ctx, stack, tok, lineOf) {
     if (lower === 'link' && /preconnect|dns-prefetch|pingback|shortlink|author|publisher|edituri|wlmanifest/i.test(get('rel'))) continue;
     if (name === 'background' && !/[?].*=|\.[a-z0-9]{2,5}($|[?#])/i.test(value)) continue;
 
+    if (value.startsWith('#') || value.startsWith('javascript:') || value.startsWith('about:') || value.startsWith('blob:')) continue;
     const direct = URL_ATTR_OK.test(name) || LAZY_ATTR_RE.test(name);
-    const hinted = !direct && !NOT_URL_ATTR.has(name) && HINT_ATTR_RE.test(name) && hasKnownExt(value);
+    const hinted = !direct && !NOT_URL_ATTR.has(name) && HINT_ATTR_RE.test(name)
+      && (hasKnownExt(value) || looksVisual(value, base));
     if (!direct && !hinted) continue;
     if (NOT_URL_ATTR.has(name) && !direct) continue;
 
@@ -198,6 +228,7 @@ function frameStart(ctx, stack, tok, lineOf) {
         addRef(ctx, {
           url: u, tag: lower, attr: name, provenance: 'attr', hint, line,
           density: cand.density, declaredWidth: cand.width, context,
+          widthHint: get('width'), heightHint: get('height'),
           alt: get('alt') || get('title') || get('aria-label'),
         });
       }
@@ -225,6 +256,15 @@ function frameStart(ctx, stack, tok, lineOf) {
 
   const styleAttr = get('style');
   if (styleAttr) collectCssUrls(styleAttr, base, ctx, { tag: lower, attr: 'style', line });
+
+  /* data-config='{"poster":"a.mp4"}' 这类把资源地址塞在 JSON 属性里的写法 */
+  for (const a of tok.attrs) {
+    if (!/^data-/i.test(a.name)) continue;
+    const v = String(a.value || '').trim();
+    if (v.length < 12 || (v[0] !== '{' && v[0] !== '[')) continue;
+    if (!/\.(jpe?g|png|webp|avif|gif|svg|mp4|webm|m4v|mov|m4a|mp3|wav|pdf|zip|docx?|xlsx?)/i.test(v)) continue;
+    collectJsonUrls(unescapeJsUrls(v), base, ctx, line, 'data-attr');
+  }
 
   const srcdoc = get('srcdoc');
   if (srcdoc && srcdoc.length < 400000) {
@@ -255,12 +295,12 @@ function frameStart(ctx, stack, tok, lineOf) {
           if (/video|player/.test(name)) hint = 'video';
           else if (/audio/.test(name)) hint = 'audio';
           else if (/image|thumb|logo|^url$/.test(name)) hint = /logo/.test(name) ? 'icon' : 'image';
-          addRef(ctx, { url: u, tag: 'meta', attr: 'meta:' + name, provenance: 'attr', hint, line, context: '<meta ' + name + '>' });
+          addRef(ctx, { url: u, tag: 'meta', attr: 'meta:' + name, provenance: 'attr', hint, line, metaKey: name, context: '<meta ' + name + '>' });
         }
       }
     } else if (/msapplication-(tileimage|square\d+logo|wide\d+logo|smalllogo|largelogo)/i.test(name) && content) {
       const u = normalizeUrl(content, base);
-      if (u) addRef(ctx, { url: u, tag: 'meta', attr: 'meta:' + name, provenance: 'attr', hint: 'icon', line });
+      if (u) addRef(ctx, { url: u, tag: 'meta', attr: 'meta:' + name, provenance: 'attr', hint: 'icon', line, metaKey: name });
     }
   } else if (lower === 'link') {
     const rel = get('rel').toLowerCase();
@@ -474,7 +514,7 @@ const AS_KIND = {
 };
 
 function hintFromTag(tag, attr, get, parentTag) {
-  if (tag === 'img' || (tag === 'input' && attr === 'src')) return 'image';
+  if (tag === 'img' || tag === 'image' || (tag === 'input' && attr === 'src')) return 'image';
   if (tag === 'picture') return 'media';
   if (tag === 'source') {
     const byMime = typeFromMime(get('type'));
@@ -509,16 +549,54 @@ function hintFromTag(tag, attr, get, parentTag) {
   return null;
 }
 
+/**
+ * 按规范切分 srcset：URL 取到第一个空白为止（因此 data URI 里的逗号不会被误切），
+ * 描述符取到下一个逗号为止；普通地址里「逗号紧跟结尾」时仍按分隔符处理。
+ */
 function parseSrcset(value) {
+  const raw = String(value || '');
   const out = [];
-  for (const part of String(value).split(',')) {
-    const seg = part.trim();
-    if (!seg) continue;
-    const bits = seg.split(/\s+/);
-    const desc = String(bits[1] || '').toLowerCase();
-    const dm = /^(\d*\.?\d+)x$/.exec(desc);
-    const wm = /^(\d+)w$/.exec(desc);
-    out.push({ url: bits[0], density: dm ? Number(dm[1]) : 0, width: wm ? Number(wm[1]) : 0 });
+  let i = 0;
+  let guard = 0;
+  const ws = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+  while (i < raw.length && guard++ < 200) {
+    while (i < raw.length && (ws(raw[i]) || raw[i] === ',')) i++;
+    if (i >= raw.length) break;
+    let url = '';
+    while (i < raw.length && !ws(raw[i])) {
+      const c = raw[i];
+      if (c === ',') {
+        /** 空白出现之前：data URI 与「已带查询逗号的地址」里的逗号属于 URL 本身 */
+        const keep = /^data:/i.test(url) || (/[?&;]/.test(url) && !/[(),]/.test(url));
+        if (!keep) break;
+      }
+      url += c; i++;
+    }
+    url = url.replace(/,+$/, '');
+    let desc = '';
+    let depth = 0;
+    let quote = '';
+    while (i < raw.length) {
+      const c = raw[i];
+      if (quote) { desc += c; if (c === quote) quote = ''; i++; continue; }
+      if (c === '"' || c === "'") { quote = c; desc += c; i++; continue; }
+      if (c === '(') depth++;
+      else if (c === ')') depth = Math.max(0, depth - 1);
+      else if (c === ',' && depth === 0) break;
+      desc += c; i++;
+    }
+    if (!url) continue;
+    const bits = desc.trim().split(/\s+/).filter(Boolean);
+    let density = 0;
+    let width = 0;
+    for (const d of bits) {
+      const m = /^(\d*\.?\d+)([wx])$/i.exec(d);
+      if (!m) continue;
+      if (m[2].toLowerCase() === 'x') density = Number(m[1]);
+      else width = Number(m[1]);
+    }
+    out.push({ url, density, width });
+    if (i >= raw.length) break;
   }
   return out;
 }
@@ -533,11 +611,20 @@ function cssContext(css, idx) {
   let sel = css.slice(start, open).replace(/\/\*[\s\S]*?\*\//g, ' ');
   const brace = sel.lastIndexOf('{');
   if (brace >= 0) sel = sel.slice(brace + 1);
-  sel = sel.replace(/\s+/g, ' ').trim().slice(-140);
+  sel = sel.replace(/[;{}]+\s*/g, ' ').replace(/\s+/g, ' ').trim().slice(-140);
   const atFace = /@font-face\b/i.test(sel) || /@font-face\b[^{}]*$/i.test(css.slice(Math.max(0, open - 220), open));
   const declStart = Math.max(css.lastIndexOf(';', idx), open);
-  const dm = /^\s*(--?[-a-zA-Z]*)\s*:/.exec(css.slice(declStart, idx));
-  return { selector: sel, atFace, prop: dm ? dm[1].toLowerCase() : '' };
+  const decl = css.slice(declStart, idx).replace(/^[;{}]+\s*/, '');
+  const dm = /^\s*(-{0,2}[a-zA-Z][-\w]*)\s*:/.exec(decl);
+  /** 所在规则块里有 background-position —— 基本可以断定是雪碧图定位 */
+  const blockEnd = css.indexOf('}', idx);
+  const block = css.slice(open, blockEnd < 0 ? Math.min(css.length, idx + 400) : blockEnd);
+  const formatM = /format\(\s*['"]?([a-z0-9.+-]+)/i.exec(css.slice(idx, idx + 200));
+  return {
+    selector: sel, atFace, prop: dm ? dm[1].toLowerCase() : '',
+    sprite: /background-position[^;]*?-?[\d.]+(?:px|rem)\b/i.test(block),
+    fontFormat: atFace && formatM ? formatM[1].toLowerCase() : '',
+  };
 }
 
 /** 注释里出现的 url() / @import 不是引用：等长空白替换，保住偏移与行号 */
@@ -555,14 +642,16 @@ function collectCssUrls(css, baseUrl, ctx, meta) {
   let guard = 0;
   while ((m = re.exec(css)) && guard++ < 4000) {
     const raw = m[2].trim();
-    if (!raw || raw.startsWith('blob:') || raw.startsWith('about:') || raw.startsWith('local(')) continue;
+    if (!raw || raw.startsWith('#') || raw.startsWith('blob:') || raw.startsWith('about:') || raw.startsWith('local(')) continue;
     const c = cssContext(css, m.index);
+    const before = css.slice(Math.max(0, m.index - 48), m.index);
+    if (/@import\s+\(?\s*['"]?$/i.test(before)) continue;   /* 交给下面的 @import 分支，避免同一地址出现两次 */
     const after = css.slice(m.index + m[0].length, m.index + m[0].length + 14);
     const density = /\s(\d(?:\.\d+)?)x/.exec(after);
     const fromImageSet = /image-set\([^)]*$/i.test(css.slice(Math.max(0, m.index - 260), m.index));
     if (raw.startsWith('data:')) {
       const parsed = parseDataUri(raw);
-      if (parsed) addRef(ctx, { dataUri: parsed, tag: meta.tag, attr: meta.attr + ':url', provenance: 'css', hint: c.atFace ? 'font' : null, selector: c.selector, line: meta.line || 0, density: density ? Number(density[1]) : 0 });
+      if (parsed) addRef(ctx, { dataUri: parsed, tag: meta.tag, attr: meta.attr + ':url', provenance: 'css', hint: c.atFace ? 'font' : null, selector: c.selector, line: meta.line || 0, density: density ? Number(density[1]) : 0, cssProp: c.prop, sprite: c.sprite, fontFormat: c.fontFormat });
       continue;
     }
     const u = normalizeUrl(raw, baseUrl);
@@ -574,6 +663,8 @@ function collectCssUrls(css, baseUrl, ctx, meta) {
       url: u, tag: meta.tag || 'style', attr: (meta.attr || 'css') + ':url', provenance: 'css', hint,
       selector: (fromImageSet ? 'image-set ' : '') + c.selector, line: meta.line || 0,
       density: density ? Number(density[1]) : 0,
+      cssProp: c.prop, sprite: !!c.sprite, fontFormat: c.fontFormat || '',
+      imageSet: fromImageSet || undefined,
       context: String(meta.attr || 'css') + ' · ' + (c.prop || '?') + (c.selector ? ' · ' + c.selector : ''),
     });
   }
@@ -584,7 +675,7 @@ function collectCssUrls(css, baseUrl, ctx, meta) {
     const raw = (m[2] || '').trim();
     if (!raw || raw.startsWith('data:') || /[^\x21-\x7e]/.test(raw) || /^(?:all|screen|print)$/.test(raw)) continue;
     const u = normalizeUrl(raw, baseUrl);
-    if (u) addRef(ctx, { url: u, tag: 'style', attr: '@import', provenance: 'css', hint: 'stylesheet', line: meta.line || 0 });
+    if (u) addRef(ctx, { url: u, tag: 'style', attr: '@import', provenance: 'css', hint: 'stylesheet', line: meta.line || 0, context: '@import' });
   }
 }
 
@@ -689,6 +780,34 @@ function walkJsonValue(ctx, baseUrl, node, key, line, origin) {
   }
 }
 
+/** style="width:24px;height:24px" 里的声明尺寸（px 与 rem 可信，% / auto 忽略） */
+function declaredPx(styleText) {
+  const s = String(styleText || '');
+  const pick = (prop) => {
+    const re = new RegExp('(?:^|[;\\s])' + prop + '\\s*:\\s*(\\d+(?:\\.\\d+)?)\\s*(px|rem)?\\s*(?:[;!]|$)', 'i');
+    const m = re.exec(s);
+    if (!m) return 0;
+    const v = Number(m[1]);
+    if (!Number.isFinite(v) || v <= 0 || v > 20000) return 0;
+    return m[2] && m[2].toLowerCase() === 'rem' ? Math.round(v * 16) : Math.round(v);
+  };
+  const w = pick('width');
+  const h = pick('height');
+  return w || h ? { w, h } : null;
+}
+
+/** 属性值像不像一个可视化资源地址（无扩展名但带图片处理参数也算） */
+function looksVisual(value, baseUrl) {
+  const v = String(value || '').trim();
+  if (!v || /\s/.test(v)) return false;
+  if (/^(?:javascript|mailto|tel|data|blob|about):/i.test(v)) return false;
+  const abs = normalizeUrl(v, baseUrl);
+  if (!abs) return false;
+  const m = urlMeta(abs);
+  if (m.ext && /^(?:image|vector|icon)$/.test(typeFromExt(m.ext) || '')) return true;
+  return !!(m.width && (m.quality || m.dpr || m.ext));
+}
+
 function hasKnownExt(value) {
   const v = String(value || '').trim();
   if (!v || /\s/.test(v)) return false;
@@ -739,7 +858,9 @@ function mergeResources(list) {
   const map = new Map();
   let n = 0;
   for (const r of list) {
-    const ext = r.dataUri ? extFromDataUri(r.dataUri.mime) : extFromPath(safePath(r.url));
+    const cdn = r.cdn || null;
+    const pathExt = r.dataUri ? '' : extFromPath(safePath(r.url));
+    const ext = r.dataUri ? extFromDataUri(r.dataUri.mime) : (pathExt || (cdn && cdn.ext) || '');
     const key = r.dataUri ? 'data::' + r.dataUri.mime + '::' + r.dataUri.data.slice(0, 200) : r.url;
     const existing = map.get(key);
     if (existing) {
@@ -763,11 +884,18 @@ function mergeResources(list) {
       if (!existing.line && r.line) existing.line = r.line;
       if (!existing.alt && r.alt) existing.alt = r.alt;
       if (!existing.hint && r.hint) existing.hint = r.hint;
+      if (!existing.cdn && r.cdn) existing.cdn = r.cdn;
+      if (!existing.cssProp && r.cssProp) existing.cssProp = r.cssProp;
+      if (!existing.fontFormat && r.fontFormat) existing.fontFormat = r.fontFormat;
+      if (!existing.metaKey && r.metaKey) existing.metaKey = r.metaKey;
+      if (!existing.viaProxy && r.viaProxy) existing.viaProxy = r.viaProxy;
+      existing.sprite = existing.sprite || !!r.sprite;
+      if (!existing.declaredHeight && r.declaredHeight) existing.declaredHeight = r.declaredHeight;
       continue;
     }
     const hinted = r.hint && r.hint !== 'media' && r.hint !== 'link' ? r.hint : null;
     const type = classify({
-      mime: r.dataUri ? r.dataUri.mime : '', ext,
+      mime: r.dataUri ? r.dataUri.mime : ((cdn && cdn.mime) || ''), ext,
       context: r.context || '<' + (r.tag || ''), hintedType: hinted,
     });
     map.set(key, {
@@ -784,10 +912,19 @@ function mergeResources(list) {
       widthHint: r.widthHint || '',
       heightHint: r.heightHint || '',
       density: r.density || 0,
-      declaredWidth: r.declaredWidth || 0,
+      declaredWidth: r.declaredWidth || (cdn && cdn.w) || 0,
+      declaredHeight: (cdn && cdn.h) || 0,
+      cdn: cdn || null,
+      urlHint: (cdn && cdn.p) || '',
+      viaProxy: r.viaProxy || '',
       selector: r.selector || '',
       alt: String(r.alt || '').slice(0, 200),
       context: String(r.context || '').slice(0, 220),
+      cssProp: r.cssProp || '',
+      sprite: !!r.sprite,
+      fontFormat: r.fontFormat || '',
+      metaKey: r.metaKey || '',
+      imageSet: !!r.imageSet,
     });
   }
   const arr = [...map.values()];

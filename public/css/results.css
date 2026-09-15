@@ -435,6 +435,7 @@ body[data-mode="work"] .results { opacity: 1; transform: none; }
 }
 .card .thumb .flag.anim { color: #ff6ec7; border-color: rgba(255, 110, 199, 0.42); }
 .card .thumb .flag.sprite { color: #4ad9ff; border-color: rgba(74, 217, 255, 0.42); }
+.card .thumb .flag.rescue { color: #ffd166; border-color: rgba(255, 209, 102, 0.5); }
 .card .thumb .flag.fam { color: var(--dim); }
 .card .thumb .flag.fam.best { color: var(--lime); border-color: rgba(184, 255, 60, 0.45); }
 .card .status .err { color: var(--muted); text-transform: none; letter-spacing: 0.06em; }

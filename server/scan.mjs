@@ -5,9 +5,10 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { extractPage, extractCss } from './extract.mjs';
-import { imageDimensions, mediaMeta, detectSignature, looksTextual, textSample } from './probe.mjs';
 import { TYPES, extFromPath, extFromMime, typeFromExt, guessMime, previewable, assetFamily } from './mime.mjs';
-import { preFilter, postFilter, summarize, filterLabel, filterHint } from './policy.mjs';
+import { preFilter, postFilter, summarize, filterLabel, filterHint, contentSignal, trimFiltered } from './policy.mjs';
+import { imageDimensions, mediaMeta, detectSignature, looksTextual, textSample, fontMeta } from './probe.mjs';
+import { pdfMeta, officeMeta, playlistMeta } from './docmeta.mjs';
 import {
   grab, decodeText, charsetOf, normalizeUrl, hostOf, sameOrigin, filenameFromUrl, shortHash,
   readCacheMeta, readCacheBuffer, writeCache, cachePath,
@@ -205,11 +206,20 @@ async function run(job) {
   /* 5. 扫描策略：UI 图标 / 占位像素 / 字体 / 样式表 / 脚本 / 数据在此剔除，一次请求都不发 */
   const filtered = [];
   const candidates = [];
+  let rescued = 0;
   for (const ref of refs) {
     const verdict = preFilter(ref, job.options);
-    if (verdict) filtered.push(filterEntry(ref, verdict, null));
-    else candidates.push(ref);
+    if (verdict) {
+      filtered.push(filterEntry(ref, verdict, null));
+    } else {
+      const signal = contentSignal(ref);
+      if (signal && !TYPES[ref.type]) ref.rescued = signal;
+      else if (signal && ref.type === 'other') ref.rescued = signal;
+      if (ref.rescued) rescued++;
+      candidates.push(ref);
+    }
   }
+  if (rescued) log(job, 'info', '按内容线索补探测 ' + rescued + ' 个无扩展名 / 无法直接归类的地址');
   if (filtered.length) {
     const sum = summarize(filtered);
     log(job, 'info', '扫描策略 · 跳过 ' + sum.total + ' 个引用（未发起请求）：' + sum.byReason.map((g) => g.label + ' ' + g.count).join(' · '));
@@ -248,9 +258,10 @@ async function run(job) {
         } else {
           items.push(item);
           const pct = 45 + Math.round((completed / Math.max(1, limited.length)) * 50);
+          job.progress = pct;
+          /* 每个条目都要实时推给前端，只有 progress 节流 */
+          emit(job, { type: 'item', item });
           if (completed % 2 === 0 || completed === limited.length) {
-            job.progress = pct;
-            emit(job, { type: 'item', item });
             emit(job, { type: 'progress', progress: pct, done: completed, total: limited.length });
           }
         }
@@ -262,7 +273,12 @@ async function run(job) {
   items.sort((a, b) => (a.status === 'ok' ? 0 : 1) - (b.status === 'ok' ? 0 : 1) || a.index - b.index);
   items.forEach((it, i) => { it.index = i + 1; });
   out.resources = items;
-  out.filtered = filtered;
+  const filterSummary = summarize(filtered);
+  const trimmed = trimFiltered(filtered);
+  out.filtered = trimmed.kept;
+  out.filteredOverflow = trimmed.dropped;
+  out.filteredTotal = filtered.length;
+  out.filterSummary = filterSummary;
 
   /* 7. 统计 */
   phase(job, 'organize', '整理资源光谱', 97);
@@ -356,6 +372,10 @@ function filterEntry(ref, verdict, item) {
     selector: ref.selector || '',
     page: ref.page || '',
     line: ref.line || 0,
+    probed: !!item,
+    status: item ? item.status : 'unresolved',
+    declaredWidth: !item && ref.widthHint ? Number(ref.widthHint) || 0 : 0,
+    cdn: !item && ref.cdn ? ref.cdn : null,
   };
 }
 
@@ -409,7 +429,9 @@ function baseItem(ref) {
     id: ref.id, url: ref.url, index: ref.index || 0, type: ref.type, ext: ref.ext,
     tag: ref.tag, attr: ref.attr, provenance: ref.provenance, hint: ref.hint,
     count: ref.count, line: ref.line, alt: ref.alt || '', density: ref.density || 0,
-    declaredWidth: ref.declaredWidth || 0, selector: ref.selector || '',
+    declaredWidth: ref.declaredWidth || 0, declaredHeight: ref.declaredHeight || 0,
+    declaredFrom: ref.cdn ? '图片服务参数' : ref.widthHint ? 'HTML/CSS 声明' : ref.heightHint ? 'HTML/CSS 声明' : '',
+    cdn: ref.cdn || null, rescued: ref.rescued || '', selector: ref.selector || '',
     page: ref.page || '', fromCss: ref.fromCss || '',
     name: '', mime: '', size: null, width: null, height: null, duration: null,
     status: 'pending', http: 0, host: ref.url ? hostOf(ref.url) : '', preview: false,
@@ -507,7 +529,12 @@ async function probeRef(job, ref) {
     else if (sig.type === 'image') { if (item.type !== 'icon') item.type = 'image'; }
     else if (sig.type === 'video' || sig.type === 'audio') item.type = sig.type;
     else if (!typeFromExt(item.ext) || item.type === 'other') item.type = sig.type;
-    if (!item.ext || item.ext === 'bin') item.ext = sig.ext;
+    if (sig.ext && (!item.ext || item.ext === 'bin')) item.ext = sig.ext;
+    else if (sig.ext && sig.ext !== item.ext && (TYPES[sig.type] || sig.type === 'vector' || sig.type === 'icon')) {
+      /** 地址后缀与真实魔数不符：以字节为准，导出的扩展名才不会“png 打不开” */
+      item.extCorrected = item.ext;
+      item.ext = sig.ext;
+    }
   }
   item.mime = mime || guessMime(item.type, item.ext);
   if (!item.ext) item.ext = extFromMime(item.mime) || '';
@@ -591,13 +618,116 @@ function applyBytesMeta(item, buffer, job, tail) {
     item.textLike = true;
     item.sample = textSample(buffer, 2600);
   }
+  deepContainerMeta(item, buffer, tail);
+}
+
+/** 文档 / 压缩包 / 播放列表 / 字体的深度解析 */
+function deepContainerMeta(item, buffer, tail) {
+  if (!buffer || !buffer.length) return;
+  const mime = String(item.mime || '').toLowerCase();
+  const ext = String(item.ext || '').toLowerCase();
+  const head = buffer.subarray(0, Math.min(buffer.length, 2 * 1024 * 1024));
+
+  /* 自适应码率清单 */
+  if (item.type === 'video' || /mpegurl|dash\+xml/.test(mime) || /\.(m3u8|mpd)$/.test(ext)) {
+    const pl = playlistMeta(head, item.url || '', mime);
+    if (pl) {
+      copyMeta(item, pl);
+      if (pl.duration) item.duration = round(pl.duration, 2);
+      if (pl.width && pl.height && !item.width) { item.width = pl.width; item.height = pl.height; }
+      if (pl.variants) delete item.variants;
+      item.variantCount = pl.variantCount || 0;
+      item.playlistInfo = [
+        pl.variantCount ? pl.variantCount + ' 档清晰度' : '单路分片流',
+        pl.segments ? pl.segments + ' 个分片' : '',
+        pl.bitrate ? Math.round(pl.bitrate / 1000) + ' kbps' : '',
+        (pl.languages || []).length ? '语言 ' + pl.languages.join('/') : '',
+        pl.encrypted ? '已加密' : '',
+        pl.live ? '直播' : '',
+      ].filter(Boolean).join(' · ');
+      item.kind = pl.kind;
+      if (pl.variants && pl.variants.length) {
+        item.variantList = pl.variants.slice(0, 8).map((v) => [v.width && v.height ? v.width + '×' + v.height : '', v.bandwidth ? Math.round(v.bandwidth / 1000) + 'kbps' : '', v.codecs || ''].filter(Boolean).join(' '));
+      }
+    }
+  }
+
+  /* PDF */
+  if (ext === 'pdf' || /pdf/.test(mime) || ascii4(head, 0) === '%PDF') {
+    const pm = pdfMeta(head.length > 4 * 1024 * 1024 ? head.subarray(0, 4 * 1024 * 1024) : buffer.length > 4 * 1024 * 1024 ? head : buffer);
+    if (pm && (pm.pages || pm.title)) {
+      if (pm.width && pm.height) {
+        pm.pageWidth = pm.width;
+        pm.pageHeight = pm.height;
+        delete pm.width;
+        delete pm.height;
+      }
+      copyMeta(item, pm);
+      item.docInfo = [pm.pages ? pm.pages + ' 页' : '', pm.pageSize || '', pm.title || '', pm.creator || ''].filter(Boolean).join(' · ');
+    }
+  }
+
+  /* OOXML / ODF / EPUB */
+  if (item.type === 'document' || item.type === 'sheet' || item.type === 'archive'
+      || /zip|epub|officedocument|opendocument/.test(mime) || /\.(docx|xlsx|pptx|epub|odt|ods|odp)$/.test(ext)) {
+    const om = officeMeta(buffer);
+    if (om && (om.flavor || om.entries)) {
+      copyMeta(item, om);
+      if (om.pages) item.docInfo = [om.pages + ' 页', om.title || '', om.creator || ''].filter(Boolean).join(' · ');
+      if (om.entryNames) delete om.entryNames;
+    }
+  }
+
+  /* 字体：家族 / 字形数 / 图标字体 */
+  if (item.type === 'font' || /\/font|typeface/.test(mime)) {
+    const fm = fontMeta(head, mime);
+    if (fm && Object.keys(fm).length) {
+      copyMeta(item, fm);
+      if (fm.iconFont) item.iconFont = true;
+      item.fontName = [fm.family, fm.style].filter(Boolean).join(' ') || fm.fullName || fm.postscriptName || '';
+    }
+  }
+}
+
+function ascii4(b, at) {
+  if (!b || at + 4 > b.length) return '';
+  let s = '';
+  for (let i = 0; i < 4; i++) s += String.fromCharCode(b[at + i]);
+  return s;
 }
 
 /** 把探测到的细节挂到条目上（只在有值时写，避免 SSE 载荷变肥） */
-const META_KEYS = ['vector', 'animated', 'frames', 'duration', 'symbols', 'sprite', 'shapes', 'effects',
-  'bitDepth', 'colorType', 'channels', 'alpha', 'interlaced', 'progressive', 'baseline', 'colorSpace',
-  'orientation', 'entries', 'sizes', 'dpi', 'lossless', 'viewBox', 'iconSet',
-  'sampleRate', 'bit', 'bitrate', 'codec', 'rotation', 'timescale', 'vbr', 'cbr', 'title', 'sampleFormat', 'dataBytes'];
+const META_KEYS = [
+  /* 图片 */
+  'vector', 'animated', 'frames', 'duration', 'symbols', 'sprite', 'shapes', 'uses', 'textNodes', 'primitiveCount',
+  'effects', 'bitDepth', 'colorType', 'channels', 'alpha', 'interlaced', 'progressive', 'baseline', 'colorSpace',
+  'orientation', 'entries', 'sizes', 'dpi', 'lossless', 'viewBox', 'iconSet', 'loops', 'version', 'background',
+  'svgTitle', 'svgDesc', 'stroke', 'embeddedImages', 'transport', 'maxVal', 'mipLevels', 'cubemap', 'volume',
+  'keyframes', 'disposal', 'overwrite', 'transparent', 'palette', 'delay',
+  'arraySize', 'hdr', 'compressed', 'idLength', 'origin', 'thumbnailBytes', 'thumbnailFormat',
+  /* 相机与色彩 */
+  'camera', 'software', 'dateTimeOriginal', 'iso', 'shutter', 'shutterLabel', 'aperture', 'apertureLabel',
+  'focalLength35', 'lensModel', 'gps', 'comment', 'incomplete', 'plays',
+  /* 视音频 */
+  'sampleRate', 'bit', 'bitrate', 'codec', 'rotation', 'timescale', 'vbr', 'cbr', 'title', 'sampleFormat',
+  'dataBytes', 'frameRate', 'tracks', 'trackKinds', 'brand', 'compatibleBrands', 'faststart', 'fragmented',
+  'created', 'modified', 'audioCodec', 'album', 'genre', 'year', 'cover', 'tagVersion', 'albumArtist',
+  'track', 'disc', 'container', 'interleaved', 'noAudio', 'noVideo', 'videoBytes', 'copyright', 'language',
+  'edited', 'samples', 'chunkOffsets', 'sttsEntries', 'sttsRun', 'encrypted',
+  /* 文档 / 播放列表 */
+  'pages', 'pageWidth', 'pageHeight', 'pageSize', 'creator', 'subject', 'keywords', 'producer', 'forms',
+  'annotations', 'links', 'images', 'linearized', 'objectStreams', 'flavor', 'uncompressedBytes', 'mediaFiles',
+  'description', 'lastModifiedBy', 'words', 'paragraphs', 'sheets', 'textCells', 'spine', 'textChars',
+  'kind', 'variantCount', 'segments', 'segmentDuration', 'startSequence', 'live', 'firstSegment', 'fmp4',
+  'sessionData', 'audioGroups', 'subtitleTracks', 'languages', 'adaptive', 'segmentTemplates', 'periods',
+  'minUpdate',
+  /* 字体 */
+  'fontFlavor', 'numTables', 'glyphs', 'unitsPerEm', 'weightClass', 'widthClass', 'embedding', 'family',
+  'style', 'fullName', 'postscriptName', 'designer', 'manufacturer', 'license', 'colorFont', 'features',
+  'metrics', 'hinting', 'italicAngle', 'bbox', 'sfntSize', 'totalSfntSize', 'os2Version', 'typoAscender',
+  'sfntFlavor', 'compressedSize', 'fontVersion', 'coverage', 'bold', 'fsSelection', 'postFormat', 'artist', 'encoder',
+  'imageSet', 'declaredFrom', 'variantList',
+];
 
 function copyMeta(item, meta) {
   for (const key of META_KEYS) {
@@ -626,6 +756,9 @@ function readHeadFile(url, maxBytes) {
 
 function buildStats(job, items, out, extra) {
   const info = extra || {};
+  const rescuedCount = items.filter((r) => r.rescued).length;
+  if (rescuedCount) out.rescuedTotal = rescuedCount;
+  const rescued = rescuedCount || out.rescuedTotal || 0;
   const byType = {};
   for (const key of Object.keys(TYPES)) byType[key] = { type: key, label: TYPES[key].label, en: TYPES[key].en, color: TYPES[key].color, glyph: TYPES[key].glyph, count: 0, bytes: 0, ok: 0, failed: 0 };
   const hosts = new Map();
@@ -673,7 +806,8 @@ function buildStats(job, items, out, extra) {
       noise: out.textBlocks.filter((b) => b.zone === 'noise').length,
     },
     doc: { bytes: out.doc.bytes || 0 },
-    filtered: summarize(out.filtered || []),
+    filtered: info.filterSummary || out.filterSummary || summarize(out.filtered || []),
+    rescued: rescued || out.rescuedTotal || 0,
     families: info.families || { groups: 0, collapsed: 0 },
     css: info.css ? { files: info.css.done, depth: info.css.depth, imports: info.css.imports, failed: info.css.failed } : null,
     policy: {
@@ -681,7 +815,10 @@ function buildStats(job, items, out, extra) {
       includeTech: !!job.options.includeTech,
       mode: job.options.includeIcons && job.options.includeTech ? '全部资源' : job.options.includeIcons ? '含 UI 图标' : job.options.includeTech ? '含技术资源' : '仅内容资源',
     },
-    requests: { probed: items.length + (out.filtered || []).filter((f) => f.size != null || f.width != null).length, skipped: (out.filtered || []).length },
+    requests: {
+      probed: items.length + (out.filtered || []).filter((f) => f.probed).length,
+      skipped: out.filteredTotal != null ? out.filteredTotal : (out.filtered || []).length,
+    },
   };
 }
 
