@@ -1,0 +1,124 @@
+/* ============ 页面预览：原始快照 + 可点选叠加层 ============ */
+.preview-stage { min-width: 0; }
+.pv { display: grid; gap: 0.7rem; }
+
+/* ---------- 工具条 ---------- */
+.pv-bar {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--panel-2);
+}
+.pv-seg { display: flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; background: var(--panel); }
+.pv-seg button {
+  border: 0; background: none; color: var(--dim); cursor: none;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
+  padding: 0.3rem 0.62rem; transition: background 0.22s, color 0.22s;
+}
+.pv-seg button:hover { color: var(--ink); }
+.pv-seg button.on { background: var(--lime); color: #06090c; }
+.pv-seg#pv-zoom button { padding: 0.3rem 0.5rem; }
+.pv-sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 0.15rem; }
+.pv-btn {
+  border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+  border-radius: 999px; padding: 0.32rem 0.66rem; cursor: none;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.07em;
+  transition: color 0.22s, border-color 0.22s, background 0.22s, transform 0.22s var(--ease);
+  text-decoration: none; display: inline-flex; align-items: center; gap: 0.35rem;
+}
+.pv-btn:hover { color: var(--cyan); border-color: var(--line-strong); transform: translateY(-1px); }
+.pv-btn.on { color: var(--lime); border-color: rgba(184, 255, 60, 0.5); background: rgba(184, 255, 60, 0.08); }
+.pv-btn.go { color: #06090c; background: var(--lime); border-color: var(--lime); }
+.pv-btn.go:hover { color: #06090c; background: #cbff6a; }
+.pv-btn:disabled { opacity: 0.42; pointer-events: none; }
+.pv-btn.ghost:hover { color: var(--red); border-color: rgba(255, 95, 95, 0.4); }
+.pv-sel { display: flex; align-items: center; gap: 0.32rem; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em; color: var(--dim); }
+.pv-sel select {
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 4px; font-family: var(--mono); font-size: 11px; padding: 0.22rem 0.3rem; cursor: none;
+}
+.pv-stat {
+  margin-left: auto; font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
+  color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 48ch;
+}
+
+/* ---------- 说明条 ---------- */
+.pv-hint {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 11px; line-height: 1.75; letter-spacing: 0.03em; color: var(--muted);
+}
+.pv-hint b { color: var(--lime); font-weight: 400; }
+.pv-hint .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 10px var(--lime); }
+.pv-hint .sep { color: var(--dim); }
+
+/* ---------- 快照视口 ---------- */
+.pv-viewport {
+  position: relative;
+  overflow: auto;
+  max-height: min(74vh, 980px);
+  padding: 0.9rem;
+  border: 1px solid var(--line); border-radius: var(--r);
+  background:
+    radial-gradient(120% 60% at 50% 0%, rgba(74, 217, 255, 0.055), transparent 70%),
+    #0a0e13;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.pv-canvas { position: relative; margin: 0 auto; }
+.pv-frame {
+  position: absolute; left: 0; top: 0;
+  border: 0; display: block; background: #fff;
+  transform-origin: 0 0;
+  width: 1280px; height: 800px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 18px 40px rgba(0, 0, 0, 0.45);
+}
+.pv-loading {
+  position: absolute; inset: 0; display: grid; place-content: center; gap: 0.9rem;
+  justify-items: center; text-align: center;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.16em; color: var(--muted);
+  background: linear-gradient(180deg, rgba(10, 14, 19, 0.9), rgba(10, 14, 19, 0.98));
+}
+.pv-loading i {
+  width: 26px; height: 26px; border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.12); border-top-color: var(--cyan);
+  animation: pvSpin 1.1s linear infinite;
+}
+@keyframes pvSpin { to { transform: rotate(360deg); } }
+
+/* ---------- 底栏：图例 + 区域结果 + 动作 ---------- */
+.pv-foot {
+  display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--panel-2);
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.04em; color: var(--muted);
+}
+.pv-legend { display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap; }
+.pv-key { display: flex; align-items: center; gap: 0.3rem; color: var(--muted); }
+.pv-key i { width: 9px; height: 9px; border-radius: 2px; }
+.pv-key s { text-decoration: none; color: var(--dim); font-size: 11.5px; letter-spacing: 0.1em; }
+.pv-key b { color: var(--ink); font-weight: 500; }
+.pv-region { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
+.pv-region b { color: var(--lime); font-weight: 500; }
+.pv-region .idle { color: var(--dim); }
+.pv-count { color: var(--dim); font-size: 11.5px; letter-spacing: 0.08em; }
+.pv-acts { margin-left: auto; display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
+
+/* ---------- 展台与预览互斥：进预览时收起卡片栅格 ---------- */
+body[data-stage="preview"] #stage-body { display: none; }
+
+@media (max-width: 1080px) {
+  .pv-stat { margin-left: 0; max-width: none; }
+  .pv-viewport { max-height: 70vh; }
+}
+
+/* ============== 非扫描区标注 / 底栏提示 ============== */
+.pv-regions { display: inline-flex; gap: 0.35rem; align-items: center; flex-wrap: wrap; }
+.pv-rg {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; color: #ffd166;
+  border: 1px solid rgba(255, 209, 102, 0.4); border-radius: 2px; padding: 1px 5px; background: rgba(255, 209, 102, 0.06);
+}
+.pv-rg i { font-style: normal; color: #fff; background: rgba(255, 209, 102, 0.24); border-radius: 2px; padding: 0 3px; margin-left: 3px; }
+.pv-rg.zero { color: #7cf6b0; border-color: rgba(124, 246, 176, 0.36); background: rgba(124, 246, 176, 0.05); }
+.pv-shift { color: var(--dim); }

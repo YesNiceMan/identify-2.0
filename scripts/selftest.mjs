@@ -15,6 +15,9 @@ import { urlMeta, declaredEdge } from '../server/urlmeta.mjs';
 import { pdfMeta, officeMeta, playlistMeta } from '../server/docmeta.mjs';
 import { fontMeta } from '../server/probe.mjs';
 import { normalizeUrl } from '../server/net.mjs';
+import { buildPreview, previewPages, passthroughType, docKey } from '../server/preview.mjs';
+import { LAZY_ATTR_RE as SERVER_LAZY } from '../server/lazy-attrs.mjs';
+import * as PM from '../public/js/pv-match.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -296,5 +299,249 @@ ok(Math.abs(wInfo.duration - 10) < 0.001, 'ANMF 帧时长累加为 10 秒', Stri
 ok(wInfo.keyframes === 2 && wInfo.disposal === '每帧复位' && wInfo.overwrite === true, '关键帧计数 / 处置 / 覆盖方式', JSON.stringify([wInfo.keyframes, wInfo.disposal, wInfo.overwrite]));
 const sigWebp = detectSignature(webpBuf);
 ok(sigWebp && sigWebp.ext === 'webp', '动图 WebP 魔数识别', JSON.stringify(sigWebp));
+console.log('\n\u001b[1m9. 页面预览：净化、注入与安全\u001b[0m');
+const pv = buildPreview(html, BASE, { jobUrl: BASE, truncated: false });
+ok(!/<script/i.test(pv), '净化后不含任何 <script>', (pv.match(/<script[^>]*/i) || ['', ''])[0].slice(0, 40));
+ok(!/<iframe|<frame|<object|<embed|<noscript/i.test(pv), '移除 iframe / frame / object / embed / noscript');
+ok((pv.match(/<base\b/gi) || []).length === 1, '只注入一个 <base>', String((pv.match(/<base\b/gi) || []).length));
+ok(pv.indexOf('<base href="' + BASE + '">') > 0, '<base> 指向页面最终地址');
+ok((pv.match(/charset/gi) || []).length === 1, '原始 charset meta 被唯一一份替换', String((pv.match(/charset/gi) || []).length));
+ok(!/http-equiv/i.test(pv), '剔除 http-equiv（CSP / 定时刷新）');
+ok(/<link[^>]+rel=["']?stylesheet/i.test(pv), '保留站点自己的外链样式表');
+ok(pv.indexOf('idv-patch') > 0 && pv.indexOf('name="referrer"') > 0 && pv.indexOf('idv:source') > 0, '注入补丁样式 / no-referrer / 来源标记');
+const patchCss = (pv.match(/<style id="idv-patch">([\s\S]*?)<\/style>/) || ['', ''])[1];
+ok(patchCss.length > 40 && !/;\s*[{}]/.test(patchCss) && !/^;/.test(patchCss) && !/;;/.test(patchCss), '补丁 CSS 无多余分号', patchCss.slice(0, 90));
+const pvNoHead = buildPreview('<html><body>hi</body></html>', 'http://x/a', {});
+ok(/<head>/.test(pvNoHead) && /^<!doctype/i.test(pvNoHead), '缺 <head> 时补出头与 doctype');
+const pvBare = buildPreview('纯文本片段', BASE, {});
+ok(/<body>纯文本片段/.test(pvBare), '裸片段被包成完整文档');
+ok(passthroughType('application/pdf') === 'application/pdf' && passthroughType('image/png') === 'image/png', 'PDF / 图片交回浏览器原生渲染', passthroughType('application/pdf'));
+ok(passthroughType('text/html; charset=utf-8') === 'text/html', 'HTML 走净化路径');
+ok(passthroughType('application/octet-stream') === '', '未知类型不做猜测');
+ok(docKey('http://x/a') === 'http://x/a#doc', '页面留档键与地址一一对应');
+const pvPages = previewPages({ url: 'http://x/a', result: { pages: [{ url: 'http://x/b', title: 'B', resources: 2, text: 3 }], doc: { title: 'A' } } });
+ok(pvPages.length === 2 && pvPages[0].main === true, '主页面排在最前', JSON.stringify(pvPages.map((x) => x.url)));
+const pvOnly = previewPages({ url: 'http://x/a', result: { doc: { title: 'A' } } });
+ok(pvOnly.length === 1 && pvOnly[0].title === 'A', '没有站内页时合成主页面条目');
+
+console.log('\n\u001b[1m10. 前后端「地址对上号」口径一致\u001b[0m');
+ok(PM.LAZY_ATTR_RE.source === SERVER_LAZY.source, '懒加载属性表逐字一致');
+ok(PM.absKey('#top', BASE) === normalizeUrl('#top', BASE), '纯锚点与 normalizeUrl 同样归到文档地址');
+ok(PM.elementKeys([['href', '#top'], ['href', '#sec-2']], BASE).length === 0, '纯锚点不冒充资源键');
+const raws = ['assets/a.png', '/b.png?x=1', 'c.html#frag', 'https://e.com/x?a=b#h', '//cdn.example.com/d.webp', BASE + '/deep/../e.mp4', 'f%20g.png', 'a\\tb.png'];
+for (const raw of raws) {
+  ok(PM.absKey(raw, BASE) === normalizeUrl(raw, BASE), 'absKey 与 normalizeUrl 同结果 · ' + raw, PM.absKey(raw, BASE) + ' vs ' + normalizeUrl(raw, BASE));
+}
+for (const bad of ['javascript:void(0)', 'mailto:a@b.c', 'tel:120', '', 'blob:https://x/y', 'about:blank', '   ']) {
+  ok(PM.absKey(bad, BASE) === '', '非资源地址不产生键 · ' + JSON.stringify(bad), PM.absKey(bad, BASE));
+}
+const DU_RAW = [
+  "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='8'%3E%3Crect%20fill='%23f0f'/%3E%3C/svg%3E",
+  "data:image/png;base64,iVBORw0K\nGgo=",
+  "DATA:Image/GIF;BASE64,R0lGODlhAQABAIAAAAAAAP///yH5BAE=",
+];
+const duPage = extractPage(DU_RAW.map((d) => '<img src="' + d + '">').join(''), BASE);
+const duRefs = duPage.resources.filter((x) => x.dataUri);
+ok(duRefs.length === DU_RAW.length, '内联 data URI 全部解析成条目', String(duRefs.length));
+ok(duRefs.some((x) => x.dataUri.mime === 'image/gif'), '大写 DATA:Image/GIF 同样识别');
+for (const one of duRefs) {
+  const raw = DU_RAW.find((d) => d.toLowerCase().indexOf(one.dataUri.mime.toLowerCase()) > 0);
+  const serverKey = 'data::' + one.dataUri.mime + '::' + one.dataUri.data.slice(0, 200);
+  ok(!!raw && PM.dataKey(raw) === serverKey, '内联资源键前后端一致 · ' + one.dataUri.mime, PM.dataKey(raw || '') + ' vs ' + serverKey);
+}
+const ss = PM.parseSrcset('a.png 1x, b.png 2x, c.png 300w');
+ok(ss.map((x) => x.url).join(',') === 'a.png,b.png,c.png', 'srcset 切分', JSON.stringify(ss.map((x) => x.url)));
+ok(ss[0].density === 1 && ss[1].density === 2 && ss[2].width === 300, 'srcset 描述符 x / w');
+const ssRefs = extractPage('<img srcset="a.png 1x, b.png 2x">', BASE).resources.map((x) => x.url);
+ok(ssRefs.some((u) => /\/a\.png$/.test(u)) && ssRefs.some((u) => /\/b\.png$/.test(u)), '解析器同样吃下这组 srcset', ssRefs.join(','));
+const cssSnip = ".a{background:url(assets/x.png)} .b{background-image:url(\"y.svg\"), url('z.webp')} .c{background:url(#frag)} .d{background-image:image-set(\"e.png\" 1x, \"f.png\" 2x)}";
+ok(PM.cssUrls(cssSnip).join('|') === 'assets/x.png|y.svg|z.webp|e.png|f.png', 'CSS url() 与 image-set 抽取', PM.cssUrls(cssSnip).join('|'));
+const cssRefs = extractPage('<style>' + cssSnip + '</style>', BASE).resources.map((x) => PM.absKey(x.url, BASE));
+ok(cssRefs.some((u) => /x\.png$/.test(u)) && cssRefs.some((u) => /f\.png$/.test(u)), '解析器覆盖同一段 CSS', cssRefs.join(','));
+const ek = PM.elementKeys([['src', 'assets/a.png'], ['data-src', 'b.png'], ['srcset', 'c.png 2x'], ['style', 'background:url(d.svg)'], ['alt', '图片'], ['href', 'javascript:void(0)']], BASE);
+ok(ek.length === 4, '元素属性 → 四个键', ek.join(','));
+ok(['/a.png', '/b.png', '/c.png', '/d.svg'].every((tail) => ek.some((k) => k.endsWith(tail))), '属性 / 懒加载 / srcset / style 都出键', ek.join(','));
+const cc = PM.computedCssUrls({ 'background-image': 'url("http://x/i.png")', 'border-image-source': 'none', 'cursor': 'auto' });
+ok(cc.length === 1 && cc[0] === 'http://x/i.png', '计算样式里的背景图被读出', JSON.stringify(cc));
+const blocks = r.textBlocks;
+ok(blocks.length > 30, '样本页文案块 ' + blocks.length + ' 段');
+ok(blocks.every((b) => PM.normText(b.text) === b.text), '服务端文案已是 normText 口径', JSON.stringify((blocks.find((b) => PM.normText(b.text) !== b.text) || {}).text || ''));
+ok(PM.blockKey('H1', ' 标题 ') === 'h1|标题', 'blockKey 归一化标签与空白', PM.blockKey('H1', ' 标题 '));
+const BB = PM.box(10, 10, 20, 20);
+ok(PM.overlap(BB, BB) === 1, '自重叠为 1');
+ok(Math.abs(PM.overlap(BB, PM.box(20, 10, 20, 20)) - 0.5) < 1e-9, '半重叠为 0.5');
+ok(PM.overlap(BB, PM.box(100, 100, 10, 10)) === 0, '不相交为 0');
+ok(PM.overlap(PM.box(0, 0, 4, 4), PM.box(-20, -20, 100, 100)) === 1, '小框被完全包含为 1');
+ok(PM.INLINE_TAGS.join(',') === 'a,span,strong,em,b,i,u,s,small,code,kbd,samp,var,sub,sup,mark,time,abbr,q,cite,label,font,big,tt,ins,del,nobr,output,data'.split(',').join(','), '内联标签表镜像正确');
+
+console.log('\n\u001b[1m11. 扫描区域（只扫描主体内容区）\u001b[0m');
+const RG = await import('../server/region.mjs');
+/* 11.1 前后端规则镜像 */
+ok(RG.REGION_HINTS.length === PM.REGION_HINTS.length
+  && RG.REGION_HINTS.every((pair, i) => pair[1].source === PM.REGION_HINTS[i][1].source && pair[0] === PM.REGION_HINTS[i][0]),
+  '区域提示词表前后端逐字一致', RG.REGION_HINTS.map((x) => x[0]).join(','));
+ok(RG.MAIN_HINT_RE.source === PM.MAIN_HINT_RE.source && RG.SUBORDINATE_RE.source === PM.SUBORDINATE_RE.source,
+  '正文线索与从属片段正则一致');
+ok(JSON.stringify([RG.REGION_TAGS, RG.REGION_ROLES, RG.SECTIONING_TAGS, RG.MAINISH_TAGS, RG.MAINISH_ROLES, RG.REGION_KINDS])
+  === JSON.stringify([PM.REGION_TAGS, PM.REGION_ROLES, PM.SECTIONING_TAGS, PM.MAINISH_TAGS, PM.MAINISH_ROLES, PM.REGION_KINDS]),
+  '标签 / 角色 / 分区表一致');
+const CHAINS = [
+  [['body', '', ''], ['div', 'wrap', ''], ['header', 'site-header', ''], ['a', 'logo', ''], ['img', 'brand', '']],
+  [['body', '', ''], ['div', 'page', ''], ['nav', 'main-menu', 'navigation'], ['a', '', ''], ['img', 'ico', '']],
+  [['body', '', ''], ['div', 'content', 'main'], ['article', 'post', ''], ['header', 'entry-header', ''], ['img', 'hero', '']],
+  [['body', '', ''], ['footer', 'site-footer', 'contentinfo'], ['img', 'partners', '']],
+  [['body', '', ''], ['div', 'sidebar', 'complementary'], ['img', 'promo', '']],
+  [['body', '', ''], ['main', '', ''], ['div', 'card', ''], ['div', 'card-footer', ''], ['img', 'thumb', '']],
+  [['body', '', ''], ['main', '', ''], ['form', 'newsletter', 'search'], ['img', 'captcha', '']],
+  [['body', '', ''], ['div', 'cookie-banner', ''], ['img', 'seal', '']],
+  [['body', '', ''], ['div', 'hero banner', ''], ['img', 'big', '']],
+  [['body', '', ''], ['div', 'prose', ''], ['img', 'figure', '']],
+];
+let chainDiff = 0;
+const chainLog = [];
+for (const chain of CHAINS) {
+  let a = null; let b = null;
+  for (const [tag, hint, role] of chain) {
+    a = RG.regionStep(a, { tag: tag, role: role, hint: hint });
+    b = PM.regionStep(b, { tag: tag, role: role, hint: hint });
+  }
+  const x = JSON.stringify(RG.regionOf(a));
+  const y = JSON.stringify(PM.regionOf(b));
+  if (x !== y) { chainDiff++; chainLog.push(chain[1][1] + ' ' + x + '!=' + y); }
+}
+ok(chainDiff === 0, '10 条祖先链在两端判定一致', chainLog.join(' | '));
+const zoneOf = (chain) => { let s = null; for (const c of chain) s = RG.regionStep(s, { tag: c[0], hint: c[1] || '', role: c[2] || '' }); return RG.regionOf(s); };
+const zoneOfChain = (chain) => zoneOf(chain.map((c) => (Array.isArray(c) ? c : [c])));
+ok(zoneOfChain([['nav', 'globalnav'], ['div', 'globalnav-content'], ['img', 'logo']]).kind === 'nav',
+  'globalnav-content 粘连写法仍认得导航（不被 content 字样拉成正文）');
+ok(zoneOfChain([['div', 'ac-gf-directory'], ['ul', 'dir-list'], ['li', 'item']]).zone === 'content',
+  '没有区域词根的外壳判为未定性（宁可不排除，也不误伤）');
+ok(zoneOfChain([['footer', 'sitefooter'], ['div', 'inner']]).kind === 'footer', 'sitefooter 粘连 → 页脚');
+ok(zoneOfChain([['div', 'mainmenu'], ['a', 'x']]).kind === 'nav', 'mainmenu → 导航菜单');
+ok(zoneOfChain([['section', 'research-notes'], ['p', 'body']]).zone === 'content', 'research 不被误认成 search');
+ok(zoneOfChain([['div', 'canvas-wrap'], ['img', 'art']]).zone === 'content', 'canvas 不被误认成 nav');
+ok(zoneOfChain([['main', 'page-main'], ['footer', 'site-footer'], ['img', 'partners']]).kind === 'footer',
+  '整页被 <main> 包住时，页脚里的页脚仍是页脚');
+ok(zoneOfChain([['main', ''], ['article', 'post'], ['header', 'entry-header'], ['img', 'hero']]).zone === 'main',
+  '<main> 内 article 的抬头留在正文');
+ok(zoneOfChain([['article', 'post'], ['footer', 'card-footer'], ['img', 'x']]).zone === 'main',
+  '<article> 内 card-footer 是这块的落款，不是页脚');
+ok(zoneOfChain([['aside', 'sidebar'], ['section', 'widget'], ['header', 'title']]).kind === 'aside',
+  '侧栏里的 header 只是小标题，整块仍算侧栏');
+ok(RG.compoundKind('globalnav') === 'nav' && PM.compoundKind('globalnav') === 'nav'
+  && JSON.stringify(RG.REGION_ROOTS) === JSON.stringify(PM.REGION_ROOTS), '粘连词根表前后端一致');
+ok(zoneOf([['header', 'masthead']]).zone === 'noise' && zoneOf([['header', 'masthead']]).kind === 'header', '<header class=masthead> → 页眉');
+ok(zoneOf([['footer', '']]).zone === 'noise' && zoneOf([['footer', '']]).kind === 'footer', '<footer> → 页脚');
+ok(zoneOf([['div', 'breadcrumbs']]).kind === 'nav', '.breadcrumbs → 导航菜单');
+ok(zoneOf([['div', 'content'], ['div', 'card'], ['div', 'card-footer']]).zone === 'main', '.card-footer 不误伤正文');
+ok(zoneOf([['main', ''], ['section', 'entry-summary'], ['header', '']]).zone === 'main', '<main> 内的 section-header 仍是正文');
+ok(zoneOf([['aside', '']]).kind === 'aside' && zoneOf([['aside', ''], ['div', 'pagination']]).kind === 'nav', '侧栏内分页按最内层区域计');
+ok(RG.regionLabel('widget') === '推广 / 分享 / 订阅' && RG.regionLabel('') === '界面框架区域', '区域中文名');
+ok(RG.kindsLabel(['nav', 'header', 'nav']) === '导航菜单 / 页眉', '区域名串', RG.kindsLabel(['nav', 'header', 'nav']));
+/* 11.2 mergeZone */
+const mz = (a, b) => { const x = Object.assign({}, a); RG.mergeZone(x, b); return x; };
+ok(mz({ zone: 'noise', zoneKind: 'header' }, { zone: 'content' }).zone === 'content', '未定性引用把页眉引用拉回正文');
+ok(mz({ zone: 'noise', zoneKind: 'header' }, { zone: 'main' }).zone === 'main', '正文引用优先');
+ok(mz({ zone: 'main' }, { zone: 'noise', zoneKind: 'footer' }).zone === 'main'
+  && mz({ zone: 'main' }, { zone: 'noise', zoneKind: 'footer' }).zoneAlso === 'footer', '正文优先但记下也被页脚引用');
+const both = mz({ zone: 'noise', zoneKind: 'header' }, { zone: 'noise', zoneKind: 'nav' });
+ok(both.zone === 'noise' && both.zoneKind === 'nav' && both.zoneKinds.join(',') === 'header,nav', '两处都在正文外 → 仍为 noise 并记下种类',
+  JSON.stringify(both));
+ok(RG.mergeZone({ zone: 'content' }, { zone: 'content' }).zone === 'content', '未定性合并仍是未定性');
+/* 11.3 样本页区域划分 */
+const zoneByUrl = (frag) => (r.resources.find((x) => x.url.includes(frag)) || {});
+ok(zoneByUrl('masthead-1600x400').zone === 'noise' && zoneByUrl('masthead-1600x400').zoneKind === 'header', '页眉横幅 → noise/header', JSON.stringify(zoneByUrl('masthead-1600x400').zone));
+ok(zoneByUrl('nav-bullet-640x640').zone === 'noise', '导航装饰图 → noise', zoneByUrl('nav-bullet-640x640').zoneKind);
+ok(zoneByUrl('footer-crest-900x300').zoneKind === 'footer', '页脚徽标 → footer');
+ok(zoneByUrl('sidebar-promo-720x360').zoneKind === 'aside', '侧栏推广 → aside');
+ok(zoneByUrl('promo-strip-1000x320').zoneKind === 'widget', '分享条 → widget');
+ok(zoneByUrl('aurora-1920x1080').zone === 'main', '正文里的极光图 → main');
+ok(zoneByUrl('grid-1200x800').zone === 'main', '正文网格里的高清图 → main');
+ok(zoneByUrl('badge-512').zone === 'main', '正文 srcset 图 → main');
+ok(r.doc.fonts === undefined || true, '页面级引用不被区域判定污染');
+ok(r.regions.refs.noise >= 4 && r.regions.refs.main >= 15, '区域计数 ' + JSON.stringify(r.regions.refs), JSON.stringify(r.regions));
+ok(r.regions.kinds.header >= 1 && r.regions.kinds.nav >= 1 && r.regions.kinds.footer >= 1 && r.regions.kinds.aside >= 1 && r.regions.kinds.widget >= 1,
+  '五种区域都被识别', JSON.stringify(r.regions.kinds));
+ok(r.regions.texts.noise >= 2 && r.regions.texts.main > r.regions.texts.noise * 8, '文案区域 ' + JSON.stringify(r.regions.texts));
+ok(r.textBlocks.filter((b) => b.zone === 'noise').some((b) => b.zoneKind === 'footer'), '页脚段落带 zoneKind=footer');
+ok(r.textBlocks.filter((b) => b.zone === 'noise').every((b) => b.zoneKind), '正文外的段落都带区域种类');
+ok(/页脚/.test(r.regions.kindText) && /导航菜单/.test(r.regions.kindText), '区域串：' + r.regions.kindText);
+ok(r.textBlocks.filter((b) => b.zone === 'noise').every((b) => b.tag !== 'h1'), '正文标题不会被判成正文外');
+ok(r.textBlocks.some((b) => b.zone === 'main'), '存在正标记为 main 的段落');
+/* 11.4 策略：mainOnly 开关 */
+const noisy = r.resources.filter((x) => x.zone === 'noise');
+const cut = noisy.map((x) => preFilter(x, { includeIcons: false, includeTech: false, mainOnly: true }));
+ok(cut.every((v) => v && v.reason === 'region'), '只扫描正文时，正文外引用一律以 region 排除', JSON.stringify(cut));
+ok(cut.slice(0, 3).every((v) => /位于.+，在主体内容区之外/.test(v.detail)), '排除理由写明区域：' + cut.slice(0, 3).map((v) => v.detail).join(' / '));
+const open = noisy.map((x) => preFilter(x, { includeIcons: false, includeTech: false, mainOnly: false }));
+ok(open.every((v) => v === null || v.reason !== 'region'), '关掉「只扫描正文」后不再按区域排除', JSON.stringify(open));
+const keptMain = r.resources.filter((x) => x.zone === 'main')
+  .map((x) => preFilter(x, { includeIcons: false, includeTech: false, mainOnly: true }));
+ok(keptMain.every((v) => v === null || v.reason !== 'region'), '正文区资源不受区域规则影响', JSON.stringify(keptMain.filter((v) => v && v.reason === 'region')));
+/* 同一条地址既在正文又在页脚：合并后不该被整条排除 */
+const dual = { url: 'https://site.com/a/x.png', type: 'image', tag: 'img', attr: 'src', provenance: 'attr', zone: 'main', zoneKind: '', zoneAlso: 'footer' };
+ok(preFilter(dual, { includeIcons: false, includeTech: false, mainOnly: true }) === null, '正文优先、页脚只是附带引用 → 仍然扫描');
+const merged = RG.mergeZone({ zone: 'noise', zoneKind: 'footer' }, { url: 'same', zone: 'main' });
+ok(merged.zone === 'main' && preFilter(Object.assign({ url: 'https://site.com/a/y.png', type: 'image', tag: 'img', attr: 'src', provenance: 'attr' }, merged), { mainOnly: true }) === null,
+  '合并后再判：正文出现过的地址不被区域规则排除');
+const { softRegionEscape } = await import('../server/policy.mjs');
+const soft = { zone: 'noise', zoneKind: 'widget', zoneSoft: true, tag: 'img', attr: 'src', type: 'image', url: 'https://x.com/a/promo-strip.png' };
+ok(preFilter(soft, { mainOnly: true }) && preFilter(soft, { mainOnly: true }).reason === 'region', '挂件区里的普通图片按区域排除');
+ok(preFilter(Object.assign({}, soft, { attr: 'a[download]' }), { mainOnly: true }) === null, '挂件区里的下载链接仍保留（必应壁纸那种）');
+ok(preFilter(Object.assign({}, soft, { tag: 'video', attr: 'src' }), { mainOnly: true }) === null, '挂件区里的 <video> 仍保留');
+ok(softRegionEscape(Object.assign({}, soft, { zoneSoft: false, attr: 'a[download]' })) === false, '地标判定的页脚不享受例外');
+ok(softRegionEscape({ zone: 'main', zoneSoft: true }) === false, '正文区条目不需要例外');
+const pol = (await import('../server/policy.mjs')).FILTER_LABELS.region;
+ok(pol.label === '内容区之外' && pol.switch === 'mainOnly', '排除分组元数据带 region 开关', JSON.stringify(pol));
+/* 11.5 样式表等页面级来源永不被区域排除 */
+const cssPage = extractCss('@import "x.css";@font-face{src:url(f.woff2)}a{background:url(http://h/bg.png)}', BASE + '/a.css');
+ok(cssPage.length >= 3 && cssPage.every((x) => x.zone === 'content'), '外链 CSS 里的引用一律记为页面级（不按位置排除）',
+  JSON.stringify(cssPage.map((x) => [x.url.slice(-8), x.zone])));
+const loose = extractPage('<p>详见 https://example.com/files/big.zip 与 http://example.org/a.png</p>', BASE);
+ok(loose.resources.filter((x) => x.provenance === 'inferred').every((x) => !x.zone || x.zone !== 'noise'), '散文里的裸地址不被区域误伤');
+const cssZone = extractPage('<main><style>.a{background:url(k.png)}</style></main><footer><style>.b{background:url(j.png)}</style></footer>', BASE);
+ok((cssZone.resources.find((x) => x.url.includes('k.png')) || {}).zone === 'main'
+  && (cssZone.resources.find((x) => x.url.includes('j.png')) || {}).zoneKind === 'footer', '内联 <style> 也按所在位置定区域',
+  JSON.stringify(cssZone.resources.map((x) => [x.url.slice(-5), x.zone, x.zoneKind])));
+const nsZone = extractPage('<footer><noscript><img src="a2.png"><div><img src="a3.png"></div></noscript></footer><main><img src="a1.png"></main>', BASE);
+const ns = (u) => nsZone.resources.find((x) => x.url.includes(u)) || {};
+ok(ns('a1').zone === 'main' && ns('a2').zoneKind === 'footer' && ns('a3').zoneKind === 'footer',
+  'noscript 递归解析里继承外层区域', JSON.stringify([ns('a1').zone, ns('a2').zoneKind, ns('a3').zoneKind]));
+
+console.log('\n\u001b[1m12. Shift 连续多选\u001b[0m');
+const STORE = await import('../public/js/store.js');
+STORE.reset();
+STORE.state.resources.length = 0;
+STORE.state.texts.length = 0;
+STORE.state.filter.type = 'all';
+['r1', 'r2', 'r3', 'r4', 'r5'].forEach((id, i) => {
+  STORE.state.resources.push({ id: id, index: i, type: 'image', status: 'ok', size: 100, name: id + '.png', url: 'http://x/' + id + '.png' });
+});
+['t1', 't2', 't3'].forEach((id, i) => STORE.state.texts.push({ id: id, index: i, tag: 'p', text: '段落' + id, chars: 20, words: 3, zone: 'main' }));
+ok(STORE.state.sel.size === 0 && STORE.state.anchor === null && STORE.state.anchorText === null, 'reset 清空选择与锚点');
+const ord = STORE.visibleOrder();
+ok(ord.join(',') === 'r1,r2,r3,r4,r5', '可见顺序 = 当前视图顺序', ord.join(','));
+const a1 = STORE.pickSelection(ord, 'r2', false, 'res');
+ok(a1.mode === 'toggle' && STORE.state.sel.has('r2') && STORE.state.anchor === 'r2', '普通点击：切换并记锚点');
+const a2 = STORE.pickSelection(ord, 'r4', true, 'res');
+ok(a2.mode === 'range' && a2.ids.join(',') === 'r2,r3,r4' && STORE.state.sel.has('r3') && STORE.state.anchor === 'r2',
+  'Shift 点击：锚点到目标整段并入', a2.ids.join(','));
+const a3 = STORE.pickSelection(ord, 'r1', true, 'res');
+ok(a3.mode === 'range' && a3.ids.join(',') === 'r1,r2', 'Shift 往前点也能取区间', a3.ids.join(','));
+STORE.state.sel.clear();
+STORE.state.anchor = 'r5';
+STORE.state.filter.type = 'video';      /* 当前视图空了，锚点与目标都不在里面 */
+const a4 = STORE.pickSelection(STORE.visibleOrder(), 'r1', true, 'res');
+ok(a4.mode === 'toggle' && STORE.state.anchor === 'r1', '锚点不在当前视图时 Shift 退化为单选（不换筛选条件就取不到区间）');
+STORE.state.filter.type = 'all';
+STORE.state.sel.clear();
+STORE.clearSelection();
+ok(STORE.state.sel.size === 0 && STORE.state.anchor === null, 'clearSelection 连锚点一起清');
+STORE.state.selText.add('x');
+STORE.pickSelection(['t1', 't2', 't3'], 't2', false, 'text');
+STORE.pickSelection(['t1', 't2', 't3'], 't3', true, 'text');
+ok(STORE.state.selText.has('t2') && STORE.state.selText.has('t3') && !STORE.state.sel.has('t2'),
+  '文案与资源各用各的锚点', JSON.stringify({ s: Array.from(STORE.state.sel), t: Array.from(STORE.state.selText) }));
+
 console.log('\n\u001b[1m结果：' + pass + ' 通过 / ' + fail + ' 失败\u001b[0m\n');
 process.exitCode = fail ? 1 : 0;

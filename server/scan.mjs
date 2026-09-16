@@ -7,12 +7,14 @@ import crypto from 'node:crypto';
 import { extractPage, extractCss } from './extract.mjs';
 import { TYPES, extFromPath, extFromMime, typeFromExt, guessMime, previewable, assetFamily } from './mime.mjs';
 import { preFilter, postFilter, summarize, filterLabel, filterHint, contentSignal, trimFiltered } from './policy.mjs';
+import { mergeZone, regionLabel } from './region.mjs';
 import { imageDimensions, mediaMeta, detectSignature, looksTextual, textSample, fontMeta } from './probe.mjs';
 import { pdfMeta, officeMeta, playlistMeta } from './docmeta.mjs';
 import {
   grab, decodeText, charsetOf, normalizeUrl, hostOf, sameOrigin, filenameFromUrl, shortHash,
   readCacheMeta, readCacheBuffer, writeCache, cachePath,
 } from './net.mjs';
+import { rememberDoc } from './preview.mjs';
 import { MAX_DOC_BYTES, MAX_ASSET_BYTES, MAX_RESOURCES, MAX_CSS_FILES, MAX_PAGES, PROBE_HEAD_BYTES } from './config.mjs';
 
 const FULL_LIMIT_IMAGE = 14 * 1024 * 1024;
@@ -38,6 +40,8 @@ export function createJob(rawUrl, options = {}) {
       /* 默认只识别内容资源：UI 图标与字体 / 样式表 / 脚本 / 数据不扫描、不请求、不导出 */
       includeIcons: options.includeIcons === true,
       includeTech: options.includeTech === true,
+      /* 默认只扫描主体内容区：页眉 / 导航菜单 / 页脚 / 侧栏 / 表单 / 挂件里的引用不请求（regionOnly=false 放开） */
+      mainOnly: options.mainOnly !== false,
       crawlPages: Math.max(0, Math.min(MAX_PAGES, Number(options.crawlPages) || 0)),
       maxResources: Math.max(20, Math.min(MAX_RESOURCES, Number(options.maxResources) || MAX_RESOURCES)),
     },
@@ -109,7 +113,8 @@ function emit(job, event) {
 }
 
 function log(job, kind, msg, extra) {
-  const entry = { kind, msg, t: Date.now() - job.startedAt, ...(extra || {}) };
+  /* t = 任务内相对毫秒（服务端统计用），at = 墙钟时间（日志流按它显示时刻） */
+  const entry = { kind, msg, t: Date.now() - job.startedAt, at: Date.now(), ...(extra || {}) };
   job.logs.push(entry);
   if (job.logs.length > 400) job.logs.shift();
   emit(job, { type: 'log', ...entry });
@@ -140,6 +145,9 @@ async function run(job) {
   });
   if (!doc.ok) throw new Error('站点返回 ' + doc.status);
   const html = decodeText(doc.body, doc.charset || sniffCharset(doc.body));
+  /* 原始文档留一份字节：「页面预览」直接读它，不再向站点发第二次请求 */
+  out.doc.preview = await rememberDoc(doc.finalUrl || job.url, doc.body, doc.contentType, doc.status, doc.truncated)
+    ? 'ready' : 'unavailable';
   out.doc.http = doc.status;
   out.doc.bytes = doc.bytes;
   out.doc.finalUrl = doc.finalUrl;
@@ -150,15 +158,28 @@ async function run(job) {
 
   /* 2. 解析结构与文案 */
   phase(job, 'parse', '解析 DOM 与资源引用', 12);
-  let parsed = extractPage(html, doc.finalUrl || job.url);
+  const region = { refs: { main: 0, content: 0, noise: 0 }, texts: { main: 0, content: 0, noise: 0 }, kinds: {}, pages: 1 };
+  const bumpRegion = (sum) => {
+    if (!sum) return;
+    for (const k of ['main', 'content', 'noise']) {
+      region.refs[k] += (sum.refs && sum.refs[k]) || 0;
+      region.texts[k] += (sum.texts && sum.texts[k]) || 0;
+    }
+    for (const k of Object.keys(sum.kinds || {})) region.kinds[k] = (region.kinds[k] || 0) + sum.kinds[k];
+  };
+  const parsed = extractPage(html, doc.finalUrl || job.url);
   out.doc = Object.assign(out.doc, parsed.doc, { host: hostOf(doc.finalUrl || job.url) });
   out.links = parsed.links;
   out.headings = parsed.headings;
   out.keywords = parsed.keywords;
   out.textBlocks = parsed.textBlocks;
-  out.pages.push({ url: doc.finalUrl || job.url, title: parsed.doc.title, main: true, resources: 0, text: parsed.textBlocks.length });
+  bumpRegion(parsed.regions);
+  out.pages.push({ url: doc.finalUrl || job.url, title: parsed.doc.title, main: true, resources: parsed.resources.length, text: parsed.textBlocks.length });
   log(job, 'info', '结构解析完成 · ' + parsed.resources.length + ' 个资源引用 · ' + parsed.textBlocks.length + ' 段文案');
-  emit(job, { type: 'meta', doc: out.doc, text: parsed.textBlocks.length, refs: parsed.resources.length, headings: parsed.headings.length });
+  log(job, 'info', (job.options.mainOnly ? '扫描区域 · 主体内容区' : '扫描区域 · 整个页面')
+    + ' · 正文引用 ' + region.refs.main + ' · 未定性 ' + region.refs.content
+    + (region.refs.noise ? ' · 非内容区 ' + region.refs.noise + '（' + regionKindText(region.kinds) + '）' : ''));
+  emit(job, { type: 'meta', doc: out.doc, text: parsed.textBlocks.length, refs: parsed.resources.length, headings: parsed.headings.length, regions: region });
 
   /* 3. 递归解析外链 CSS
    *    样式表自身按扫描策略不进入结果，但一定要读它——否则其中的背景图与图标精灵会漏掉。 */
@@ -190,11 +211,20 @@ async function run(job) {
         try {
           const page = await grab(target, { maxBytes: 2 * 1024 * 1024, referer: job.url, retries: 0 });
           if (!page.ok) throw new Error('HTTP ' + page.status);
+          const pageCt = String(page.contentType || '').split(';')[0].trim().toLowerCase();
+          if (pageCt && !/(html|xhtml|xml)$/.test(pageCt)) {
+            log(job, 'info', '站内链接不是页面（' + pageCt + '）· 只计入资源，不展开为页面');
+            continue;
+          }
           const pageHtml = decodeText(page.body, page.charset || sniffCharset(page.body));
-          const sub = extractPage(pageHtml, page.finalUrl || target);
-          refs = mergeRefLists(refs, sub.resources.map((r) => Object.assign(r, { page: target })));
-          out.textBlocks = mergeTextBlocks(out.textBlocks, sub.textBlocks, target);
-          out.pages.push({ url: page.finalUrl || target, title: sub.doc.title, resources: sub.resources.length, text: sub.textBlocks.length });
+          const pageUrl = page.finalUrl || target;
+          await rememberDoc(pageUrl, page.body, page.contentType, page.status, page.truncated);
+          const sub = extractPage(pageHtml, pageUrl);
+          region.pages++;
+          bumpRegion(sub.regions);
+          refs = mergeRefLists(refs, sub.resources.map((r) => Object.assign(r, { page: pageUrl })));
+          out.textBlocks = mergeTextBlocks(out.textBlocks, sub.textBlocks, pageUrl);
+          out.pages.push({ url: pageUrl, title: sub.doc.title, resources: sub.resources.length, text: sub.textBlocks.length });
           log(job, 'info', '站内页 · ' + (sub.doc.title || target).slice(0, 40) + ' → ' + sub.resources.length + ' 个引用');
         } catch (err) {
           log(job, 'warn', '站内页跳过 · ' + target + ' · ' + (err.message || '').slice(0, 60));
@@ -220,6 +250,12 @@ async function run(job) {
     }
   }
   if (rescued) log(job, 'info', '按内容线索补探测 ' + rescued + ' 个无扩展名 / 无法直接归类的地址');
+  const byRegion = filtered.filter((f) => f.reason === 'region');
+  if (byRegion.length) {
+    const kinds = {};
+    for (const f of byRegion) kinds[f.kind || 'other'] = (kinds[f.kind || 'other'] || 0) + 1;
+    log(job, 'info', '扫描区域 · 已排除正文之外 ' + byRegion.length + ' 项 · ' + regionKindText(kinds) + '（关掉「只扫描主体内容区」可一并识别）');
+  }
   if (filtered.length) {
     const sum = summarize(filtered);
     log(job, 'info', '扫描策略 · 跳过 ' + sum.total + ' 个引用（未发起请求）：' + sum.byReason.map((g) => g.label + ' ' + g.count).join(' · '));
@@ -284,6 +320,7 @@ async function run(job) {
   phase(job, 'organize', '整理资源光谱', 97);
   markDuplicates(items);
   const families = groupFamilies(items);
+  out.region = { mainOnly: !!job.options.mainOnly, refs: region.refs, texts: region.texts, kinds: region.kinds, skipped: byRegion.length, pages: region.pages };
   out.stats = buildStats(job, items, out, { css: cssStat, families });
   out.logs = job.logs;
   job.progress = 100;
@@ -372,6 +409,8 @@ function filterEntry(ref, verdict, item) {
     selector: ref.selector || '',
     page: ref.page || '',
     line: ref.line || 0,
+    zone: ref.zone || 'content', zoneKind: ref.zoneKind || '', zoneSoft: ref.zoneSoft === true, zoneAlso: ref.zoneAlso || '',
+    kind: verdict.reason === 'region' ? (ref.zoneKind || '') : '',
     probed: !!item,
     status: item ? item.status : 'unresolved',
     declaredWidth: !item && ref.widthHint ? Number(ref.widthHint) || 0 : 0,
@@ -433,6 +472,7 @@ function baseItem(ref) {
     declaredFrom: ref.cdn ? '图片服务参数' : ref.widthHint ? 'HTML/CSS 声明' : ref.heightHint ? 'HTML/CSS 声明' : '',
     cdn: ref.cdn || null, rescued: ref.rescued || '', selector: ref.selector || '',
     page: ref.page || '', fromCss: ref.fromCss || '',
+    zone: ref.zone || 'content', zoneKind: ref.zoneKind || '', zoneSoft: ref.zoneSoft === true, zoneAlso: ref.zoneAlso || '',
     name: '', mime: '', size: null, width: null, height: null, duration: null,
     status: 'pending', http: 0, host: ref.url ? hostOf(ref.url) : '', preview: false,
     src: '', download: '', cached: false, hash: '', dup: false, format: '', sample: '',
@@ -452,6 +492,8 @@ async function probeRef(job, ref) {
     item.source = 'data-uri';
     item.inline = true;
     item.mime = ref.dataUri.mime;
+    /* 与解析器合并地址时同一把键：页面预览靠它把内联 data URI 对上 DOM 元素 */
+    item.dataKey = 'data::' + ref.dataUri.mime + '::' + String(ref.dataUri.data).slice(0, 200);
     item.ext = ref.ext || extFromDataUri(ref.dataUri.mime);
     item.name = uniqueName('inline-' + shortHash(ref.dataUri.data, 6) + '.' + item.ext, job);
     let buffer = null;
@@ -813,8 +855,10 @@ function buildStats(job, items, out, extra) {
     policy: {
       includeIcons: !!job.options.includeIcons,
       includeTech: !!job.options.includeTech,
+      mainOnly: !!job.options.mainOnly,
       mode: job.options.includeIcons && job.options.includeTech ? '全部资源' : job.options.includeIcons ? '含 UI 图标' : job.options.includeTech ? '含技术资源' : '仅内容资源',
     },
+    region: out.region || { mainOnly: !!job.options.mainOnly },
     requests: {
       probed: items.length + (out.filtered || []).filter((f) => f.probed).length,
       skipped: out.filteredTotal != null ? out.filteredTotal : (out.filtered || []).length,
@@ -833,6 +877,12 @@ function markDuplicates(items) {
   }
 }
 
+/** 区域种类汇总 → 「页眉 / 导航菜单」 */
+function regionKindText(kinds) {
+  const list = Object.keys(kinds || {}).filter((k) => kinds[k] > 0);
+  return list.length ? list.map((k) => regionLabel(k) + ' ' + kinds[k]).join(' · ') : '未识别';
+}
+
 function mergeRefLists(a, b) {
   const map = new Map();
   for (const r of a) map.set(r.dataUri ? 'd' + (r.dataUri.data || '').slice(0, 60) : r.url, r);
@@ -843,6 +893,8 @@ function mergeRefLists(a, b) {
       const prev = map.get(key);
       prev.count++;
       if (r.page) prev.page = prev.page || r.page;
+      /* 跨区域合并：有一处落在正文 / 未定性区域就不再算「内容区之外」 */
+      mergeZone(prev, r);
       continue;
     }
     map.set(key, r);
@@ -874,7 +926,7 @@ function pickCrawlTargets(links, baseUrl, limit) {
     let u;
     try { u = new URL(l.url); } catch { continue; }
     if (u.pathname !== baseUrl && seen.has(u.pathname)) continue;
-    if (/\.(pdf|zip|docx?|xlsx?|mp4|mp3|png|jpe?g|gif|webp|svg|js|css)($|[?#])/i.test(u.pathname)) continue;
+    if (/\.(pdf|zips?|rar|7z|tar|gz|tgz|bz2|xz|docx?|xlsx?|pptx?|csv|tsv|log|mp4|mkv|mov|avi|webm|m4v|mp3|m4a|flac|wav|ogg|opus|aac|png|jpe?g|gif|webp|avif|apng|svg|bmp|ico|tiff?|heic|woff2?|ttf|otf|eot|js|mjs|cjs|css|json|jsonld|xml|txt|md|ya?ml|apk|dmg|exe|msi|bin|wasm|ics|vcf|torrent)($|[?#])/i.test(u.pathname)) continue;
     if (/(login|signin|logout|signup|register|cart|checkout|share|print)/i.test(u.pathname)) continue;
     seen.add(u.pathname);
     out.push(u.toString());

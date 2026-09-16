@@ -3,15 +3,17 @@
  * 排除在识别与导出之外；同时保证**真正的内容资源不会被误杀**。
  *
  * 分两级执行，目的是**连请求都不发出**：
- *   preFilter(ref)   —— 解析阶段，仅凭地址 / 属性 / 样式选择器 / 声明尺寸 / 图片处理参数判断（零网络开销）
+ *   preFilter(ref)   —— 解析阶段，仅凭地址 / 属性 / 样式选择器 / 声明尺寸 / 所在版面区域判断（零网络开销）
  *   postFilter(item) —— 探测之后，用真实像素尺寸、魔数与容器结论补判（小图、精灵图、占位像素）
  *
  * reason 取值：
+ *   'region'  扫描区域之外：引用位于页眉 / 导航菜单 / 页脚 / 侧栏 / 表单 / 挂件（mainOnly 可放开）
  *   'icon'    UI 图标：站点图标、界面小图、精灵图、表情 / 徽章 / 头像占位（includeIcons 可打开）
  *   'pixel'   占位像素与统计打点：1×1、spacer、beacon（始终排除）
  *   'font' | 'stylesheet' | 'script' | 'data' | 'page' | 'other'   技术资源（includeTech 可打开）
  */
 import { TECH_TYPES, CHROME_TYPES, TYPES } from './mime.mjs';
+import { regionLabel } from './region.mjs';
 import { urlMeta, declaredEdge } from './urlmeta.mjs';
 import { LAZY_ATTR_RE } from './lazy-attrs.mjs';
 
@@ -45,6 +47,7 @@ const MEDIA_TAGS = new Set(['img', 'image', 'source', 'video', 'audio', 'picture
 
 /** 供 UI 展示的理由说明 */
 export const FILTER_LABELS = {
+  region: { label: '内容区之外', hint: '引用位于页眉 / 导航菜单 / 页脚 / 侧栏 / 表单 / 挂件；只凭 class 命名判定的区域里，下载链接与媒体标签仍会保留。关掉「只扫描主体内容区」即可一并识别', switch: 'mainOnly' },
   icon: { label: 'UI 图标', hint: '站点图标、界面小图、精灵图、表情 / 徽章 / 默认头像', switch: 'includeIcons' },
   pixel: { label: '占位像素', hint: '1×1 透明图、统计打点、spacer', switch: null },
   font: { label: '字体', hint: '@font-face 与字体文件', switch: 'includeTech' },
@@ -123,14 +126,42 @@ export function contentSignal(ref) {
 }
 
 /**
+ * 「只凭 class / id 命名」判定的非内容区里，两类引用仍然放行：
+ *   · 下载链接（a[download] / a[href] 带 download 属性）—— 页面上明写「下载这个文件」的本身就是内容，
+ *     必应首页的当日壁纸原图就挂在分享菜单里，靠这条不被误杀；
+ *   · 媒体标签（video / audio / source / picture / track / object / embed / iframe）。
+ * 语义地标（<nav>/<footer>/role=banner…）判定的区域不享受这个例外——那里是真页脚，不是猜的。
+ */
+export function softRegionEscape(ref) {
+  if (!ref || ref.zoneSoft !== true) return false;
+  const tag = String(ref.tag || '').toLowerCase();
+  const attr = String(ref.attr || '');
+  if (/^a\[download\]$|^download$/i.test(attr)) return true;
+  return /^(video|audio|source|picture|track|object|embed|iframe)$/i.test(tag);
+}
+
+/**
  * 解析阶段判定（不发起任何请求）。
  * @param ref extract.mjs 产出的引用
- * @param opts { includeIcons, includeTech }
+ * @param opts { includeIcons, includeTech, mainOnly }
  * @returns null 表示保留，否则 { reason, detail }
  */
 export function preFilter(ref, opts = {}) {
   const includeIcons = !!opts.includeIcons;
   const includeTech = !!opts.includeTech;
+  const mainOnly = !!opts.mainOnly;
+
+  /**
+   * 最后一道：扫描区域。前面所有规则都是「这东西本来就不该扫」，
+   * 走到这里说明它是一个**内容资源**，只是出现的位置在正文之外——
+   * 页眉 / 导航菜单 / 页脚 / 侧栏 / 表单 / 挂件里的引用默认不发请求（关掉 mainOnly 即恢复整页扫描）。
+   * 样式表、脚本、正文裸链接等页面级来源在解析阶段就记为 content，不受这条影响。
+   */
+  const pass = () => {
+    if (!mainOnly || ref.zone !== 'noise') return null;
+    if (softRegionEscape(ref)) return null;
+    return { reason: 'region', detail: '位于' + regionLabel(ref.zoneKind) + (ref.zoneSoft ? '（按命名推断）' : '') + '，在主体内容区之外' };
+  };
   const type = ref.type || 'other';
   const isData = !!ref.dataUri;
   const url = ref.url || '';
@@ -157,21 +188,21 @@ export function preFilter(ref, opts = {}) {
 
   /* 3. 技术资源：字体 / 样式表 / 脚本 / 数据 / 页面 / 无法归类 */
   if (isTechType(type)) {
-    if (includeTech) return null;
+    if (includeTech) return pass();
     /** 「无法归类」不能一刀切：地址没有扩展名是常态，先探一次再判，避免误杀内容 */
     if (type === 'other') {
       const signal = contentSignal(ref);
-      if (signal) return null;
+      if (signal) return pass();
     }
     return { reason: type, detail: TYPES[type] ? TYPES[type].label : type };
   }
 
   /* 4. 解析阶段已判定为界面图标的（link rel=icon、.ico、图标目录、图标精灵） */
   if (isChromeType(type)) {
-    return includeIcons ? null : { reason: 'icon', detail: '类别为 UI 图标' };
+    return includeIcons ? pass() : { reason: 'icon', detail: '类别为 UI 图标' };
   }
 
-  if (includeIcons) return null;
+  if (includeIcons) return pass();
 
   /* 5. 名字 / 目录像界面图标（但声明尺寸明显大于图标时交回内容判断） */
   const declared = declaredEdgeOf(ref);
@@ -197,7 +228,7 @@ export function preFilter(ref, opts = {}) {
   if (visual && edge > 0 && edge <= ICON_MAX_EDGE) {
     return { reason: 'icon', detail: '声明尺寸 ' + edge + 'px' };
   }
-  return null;
+  return pass();
 }
 
 /**

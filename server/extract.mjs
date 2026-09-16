@@ -10,10 +10,16 @@
  *   脚本与数据 内联脚本裸链接 · key:"value" 对 · 完整 JSON 递归遍历 · application/ld+json
  *   其他       noscript（按真实 HTML 递归解析）· srcdoc（递归解析）· meta(og: / twitter: / itemprop /
  *              msapplication) · link rel(icon / preload as=…) · data URI · <a href|download>
+ *
+ * 扫描区域：每个元素沿祖先链步进一次 regionStep（见 server/region.mjs），得出它落在
+ * 主体内容区（main / content）还是非内容区（noise：页眉 / 导航菜单 / 页脚 / 侧栏 / 表单 / 挂件）。
+ * 结论写到文案块（zone / zoneKind）与资源引用（zone / zoneKind）上，扫描策略据此实现
+ * 「只扫描主体内容区」；样式表、脚本、正文裸链接这类页面级来源永远记 content，不因位置被排除。
  */
 import { classify, extFromPath, typeFromExt, typeFromMime, TYPES, KNOWN_EXT_SOURCE } from './mime.mjs';
 import { urlMeta, compactUrlMeta } from './urlmeta.mjs';
 import { normalizeUrl } from './net.mjs';
+import { regionStep, regionOf, kindsLabel, mergeZone } from './region.mjs';
 
 const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
 const RAW_TEXT = new Set(['script', 'style', 'noscript', 'textarea', 'title']);
@@ -23,8 +29,7 @@ const BLOCK_TEXT = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li', 'dt',
 const INLINE = new Set(['a', 'span', 'strong', 'em', 'b', 'i', 'u', 's', 'small', 'code', 'kbd', 'samp', 'var', 'sub', 'sup',
   'mark', 'time', 'abbr', 'q', 'cite', 'label', 'font', 'big', 'tt', 'ins', 'del', 'nobr', 'output', 'data']);
 const HEADING_LIKE = /^h([1-6])$/;
-const NOISE_RE = /(^|[^a-z])(nav|navbar|menu|footer|header|sidebar|aside|comment|discuss|advert|ads|banner|cookie|privacy|subscribe|newsletter|search|login|signin|signup|share|social|related|recommend|crumb|toolbar|pagination|pager|copyright|legal|terms|lang|modal|popup|drawer)([^a-z]|$)/i;
-const MAINISH = new Set(['main', 'article']);
+/* 区域判定（页眉 / 导航菜单 / 页脚 / 侧栏 / 表单 / 挂件 vs 主体内容区）统一在 server/region.mjs */
 const IMPLICIT = {
   p: ['p'], li: ['li', 'p'], dt: ['dt', 'dd', 'p'], dd: ['dt', 'dd', 'p'],
   td: ['td', 'th', 'p'], th: ['td', 'th', 'p'], tr: ['tr', 'td', 'th', 'p'], option: ['option', 'optgroup', 'p'],
@@ -53,7 +58,9 @@ export function extractPage(html, baseUrl) {
   const ctx = newContext(baseUrl);
   walkDocument(html, ctx, { text: true });
 
-  /* 全文兜底：剥掉标签与脚本，只留正文里裸露的地址 */
+  /* 全文兜底：剥掉标签与脚本，只留正文里裸露的地址（页面级来源，不带区域） */
+  ctx.rstate = null;
+  ctx.pageLevel = true;
   const prose = String(html)
     .replace(/<script[\s\S]*?<\/script\s*>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style\s*>/gi, ' ')
@@ -80,12 +87,14 @@ export function extractPage(html, baseUrl) {
     textBlocks: unique,
     keywords: topKeywords(unique.filter((b) => b.zone !== 'noise').map((b) => b.text).join(' ')),
     stats: { htmlBytes: Buffer.byteLength(html, 'utf-8'), blocks: unique.length, tokens: ctx.tokens },
+    regions: regionSummary(resources, unique),
   };
 }
 
 /** 单独解析一段 CSS（供深度扫描递归引用） */
 export function extractCss(cssText, cssUrl) {
   const ctx = newContext(cssUrl);
+  ctx.pageLevel = true;   /* 外链样式表不属于任何版面区域，永不按位置排除 */
   collectCssUrls(String(cssText || ''), cssUrl, ctx, { tag: 'style', attr: 'css-file', line: 0 });
   return mergeResources(ctx.resources);
 }
@@ -93,6 +102,9 @@ export function extractCss(cssText, cssUrl) {
 function newContext(baseUrl) {
   return {
     baseUrl,
+    rstate: null,          // 当前元素的区域状态（regionStep 逐步推进）
+    rseed: null,           // 递归片段（noscript / srcdoc）继承的外层状态
+    pageLevel: false,      // 页面级来源（外链 CSS / 脚本 / 正文裸链接）不参与区域排除
     resources: [],
     blocks: [],
     headings: [],
@@ -106,6 +118,12 @@ function newContext(baseUrl) {
 
 function addRef(ctx, ref) {
   if (ctx.nest && ref.attr) ref.attr = ctx.nest + ref.attr;
+  if (ref.zone === undefined) {
+    const reg = regionOf(ctx.pageLevel ? null : ctx.rstate);
+    ref.zone = reg.zone;
+    ref.zoneKind = ctx.pageLevel ? '' : reg.kind;
+    ref.zoneSoft = ctx.pageLevel ? false : !!reg.soft;
+  }
   if (ref.url && !ref.dataUri && ref.cdn === undefined) {
     const m = urlMeta(ref.url);
     const cm = compactUrlMeta(m);
@@ -147,7 +165,7 @@ function walkDocument(html, ctx, opts) {
       }
       frameStart(ctx, stack, tok, lineOf);
       if (!VOID.has(tok.name) && !tok.selfClosing) {
-        stack.push({ name: tok.name, attrs: tok.attrs, start: tok.start, raw: tok.raw, direct: [], opaque: OPAQUE.has(tok.name), line: lineOf(tok.start) });
+        stack.push({ name: tok.name, attrs: tok.attrs, start: tok.start, raw: tok.raw, direct: [], opaque: OPAQUE.has(tok.name), line: lineOf(tok.start), rstate: ctx.rstate });
       }
       if (stack.length > 250) { while (stack.length) flush(ctx, stack.pop(), stack); }
     } else if (tok.type === 'raw') {
@@ -178,6 +196,13 @@ function frameStart(ctx, stack, tok, lineOf) {
   const doc = ctx.doc;
   const line = lineOf(tok.start);
   const parentTag = (top(stack) || {}).name || '';
+
+  /* 区域状态：父元素状态 + 本元素的标签 / role / id·class（region.mjs） */
+  ctx.rstate = regionStep((top(stack) || {}).rstate || ctx.rseed, {
+    tag: lower,
+    role: get('role') || '',
+    hint: (get('id') || '') + ' ' + (get('class') || ''),
+  });
 
   /* <base href> 之后所有相对地址都改用它作基准 */
   if (lower === 'base') {
@@ -218,7 +243,7 @@ function frameStart(ctx, stack, tok, lineOf) {
 
     if (/srcset$/i.test(name)) {
       for (const cand of parseSrcset(value)) {
-        if (cand.url.startsWith('data:')) {
+        if (isDataUri(cand.url)) {
           const parsed = parseDataUri(cand.url);
           if (parsed) addRef(ctx, { dataUri: parsed, tag: lower, attr: name, provenance: 'datauri', hint, line, density: cand.density, declaredWidth: cand.width });
           continue;
@@ -235,7 +260,7 @@ function frameStart(ctx, stack, tok, lineOf) {
       continue;
     }
 
-    if (value.startsWith('data:')) {
+    if (isDataUri(value)) {
       const parsed = parseDataUri(value);
       if (parsed) addRef(ctx, { dataUri: parsed, tag: lower, attr: name, provenance: 'datauri', hint, context, line });
       continue;
@@ -269,9 +294,12 @@ function frameStart(ctx, stack, tok, lineOf) {
   const srcdoc = get('srcdoc');
   if (srcdoc && srcdoc.length < 400000) {
     const prev = ctx.nest;
+    const prevSeed = ctx.rseed;
     ctx.nest = 'srcdoc:';
+    ctx.rseed = ctx.rstate;
     walkDocument(decodeEntities(srcdoc), ctx, { text: false, line });
     ctx.nest = prev;
+    ctx.rseed = prevSeed;
   }
 
   if (lower === 'meta') {
@@ -338,6 +366,8 @@ function frameRaw(ctx, tok, lineOf) {
   const base = ctx.baseUrl;
   const line = lineOf(tok.start);
   if (tok.name === 'style') {
+    /* 内联样式表就在这一处，位置即区域：写在 <footer> 里的背景图同样算「正文之外」。
+       外链样式表另说——extractCss() 把 pageLevel 置真，整份文件都不按位置排除。 */
     collectCssUrls(tok.value, base, ctx, { tag: 'style', attr: 'css', line });
     return;
   }
@@ -346,6 +376,8 @@ function frameRaw(ctx, tok, lineOf) {
     return;
   }
   if (tok.name === 'script') {
+    const prevState = ctx.rstate;
+    ctx.rstate = null;         /* 脚本里的数据岛描述整页，不按所在位置排除 */
     const code = unescapeJsUrls(tok.value);
     const isStructured = /type\s*=\s*["'](?:application|text)\/json/i.test(tok.raw || '') || /^\s*[[{]/.test(code);
     collectLooseUrls(code, base, ctx, line, 'script');
@@ -355,7 +387,7 @@ function frameRaw(ctx, tok, lineOf) {
     let guard = 0;
     while ((m = pair.exec(code)) && guard++ < 900) {
       const raw = m[1];
-      if (raw.startsWith('data:')) continue;
+      if (isDataUri(raw)) continue;
       const u = normalizeUrl(raw, base);
       if (!u) continue;
       const ext = extFromPath(safePath(u));
@@ -363,14 +395,18 @@ function frameRaw(ctx, tok, lineOf) {
       if (!t) continue;
       addRef(ctx, { url: u, tag: 'inferred', attr: 'js:' + m[0].replace(/\s+/g, ' ').slice(0, 20), provenance: 'inferred', hint: t, line });
     }
+    ctx.rstate = prevState;
     return;
   }
   if (tok.name === 'noscript') {
-    /* noscript 里装的是真正的 HTML：直接递归解析，比正则抠属性可靠得多 */
+    /* noscript 里装的是真正的 HTML：直接递归解析，比正则抠属性可靠得多（区域继承外层） */
     const prev = ctx.nest;
+    const prevSeed = ctx.rseed;
     ctx.nest = 'noscript:';
+    ctx.rseed = ctx.rstate;
     walkDocument(tok.value, ctx, { text: false, line });
     ctx.nest = prev;
+    ctx.rseed = prevSeed;
   }
 }
 
@@ -394,7 +430,8 @@ function flush(ctx, node, stack) {
     if (name === 'a' && text.length < 40) return;
   }
   const level = HEADING_LIKE.exec(name);
-  const zone = zoneOf(stack, node);
+  const region = regionOf(node.rstate);
+  const zone = region.zone;
   ctx.blocks.push({
     order: ctx.seq++, tag: name,
     level: level ? Number(level[1]) : 0,
@@ -402,21 +439,9 @@ function flush(ctx, node, stack) {
     id: attrValue(node.attrs, 'id') || '',
     cls: String(attrValue(node.attrs, 'class') || '').slice(0, 120),
     href: attrValue(node.attrs, 'href') || '',
-    offset: node.start, line: node.line || 0, zone,
+    offset: node.start, line: node.line || 0, zone, zoneKind: region.kind, zoneSoft: !!region.soft,
   });
   if (level) ctx.headings.push({ level: Number(level[1]), text, chars: countChars(text), zone });
-}
-
-function zoneOf(stack, node) {
-  let zone = 'content';
-  for (const s of stack) {
-    if (!s || s === node) continue;
-    if (MAINISH.has(s.name)) zone = 'main';
-    if (s.name === 'nav' || s.name === 'footer' || s.name === 'header') return 'noise';
-    const hint = (attrValue(s.attrs, 'id') || '') + ' ' + (attrValue(s.attrs, 'class') || '');
-    if (NOISE_RE.test(hint.toLowerCase())) return 'noise';
-  }
-  return zone;
 }
 
 /* ------------------------------------------------------------- 分词器 */
@@ -649,7 +674,7 @@ function collectCssUrls(css, baseUrl, ctx, meta) {
     const after = css.slice(m.index + m[0].length, m.index + m[0].length + 14);
     const density = /\s(\d(?:\.\d+)?)x/.exec(after);
     const fromImageSet = /image-set\([^)]*$/i.test(css.slice(Math.max(0, m.index - 260), m.index));
-    if (raw.startsWith('data:')) {
+    if (isDataUri(raw)) {
       const parsed = parseDataUri(raw);
       if (parsed) addRef(ctx, { dataUri: parsed, tag: meta.tag, attr: meta.attr + ':url', provenance: 'css', hint: c.atFace ? 'font' : null, selector: c.selector, line: meta.line || 0, density: density ? Number(density[1]) : 0, cssProp: c.prop, sprite: c.sprite, fontFormat: c.fontFormat });
       continue;
@@ -668,12 +693,36 @@ function collectCssUrls(css, baseUrl, ctx, meta) {
       context: String(meta.attr || 'css') + ' · ' + (c.prop || '?') + (c.selector ? ' · ' + c.selector : ''),
     });
   }
+  /* image-set() 允许直接写字符串：image-set("a.png" 1x, "b@2x.png" 2x) —— url() 形态上面已收 */
+  const setRe = /(?:-[a-z]+-)?image-set\(((?:[^()]|\([^()]*\))*)\)/gi;
+  let sm;
+  let sg = 0;
+  while ((sm = setRe.exec(css)) && sg++ < 200) {
+    const body = sm[1] || '';
+    if (body.indexOf('"') < 0 && body.indexOf('\x27') < 0) continue;
+    const sc = cssContext(css, sm.index);
+    for (const piece of body.split(',')) {
+      const q = /^\s*(['"])([^'"]+)\1\s*(?:(\d*\.?\d+)x|(\d+)w)?\s*$/.exec(piece);
+      if (!q) continue;
+      const raw = q[2].trim();
+      if (!raw || raw.startsWith('#') || isDataUri(raw) || raw.startsWith('blob:') || /^local\(/i.test(raw)) continue;
+      const u = normalizeUrl(raw, baseUrl);
+      if (!u) continue;
+      addRef(ctx, {
+        url: u, tag: meta.tag || 'style', attr: (meta.attr || 'css') + ':image-set', provenance: 'css',
+        hint: sc.atFace ? 'font' : null, selector: 'image-set ' + sc.selector, line: meta.line || 0,
+        density: q[3] ? Number(q[3]) : 0,
+        cssProp: sc.prop, sprite: !!sc.sprite, fontFormat: sc.fontFormat || '', imageSet: true,
+        context: String(meta.attr || 'css') + ' · image-set' + (sc.selector ? ' · ' + sc.selector : ''),
+      });
+    }
+  }
   /* @import：url("x") / url(x) / "x" / x 四种写法都收 */
   const imp = /@import\s+(?:url\(\s*)?(['"]?)([^'"\s);,]+)\1\s*\)?/gi;
   guard = 0;
   while ((m = imp.exec(css)) && guard++ < 240) {
     const raw = (m[2] || '').trim();
-    if (!raw || raw.startsWith('data:') || /[^\x21-\x7e]/.test(raw) || /^(?:all|screen|print)$/.test(raw)) continue;
+    if (!raw || isDataUri(raw) || /[^\x21-\x7e]/.test(raw) || /^(?:all|screen|print)$/.test(raw)) continue;
     const u = normalizeUrl(raw, baseUrl);
     if (u) addRef(ctx, { url: u, tag: 'style', attr: '@import', provenance: 'css', hint: 'stylesheet', line: meta.line || 0, context: '@import' });
   }
@@ -746,7 +795,7 @@ function walkJsonValue(ctx, baseUrl, node, key, line, origin) {
     for (const piece of node.split(/\s*,\s+/)) {
       const raw = String(piece).trim();
       if (!raw || raw.length > 1200) continue;
-      if (raw.startsWith('data:')) {
+      if (isDataUri(raw)) {
         if (!media) continue;
         const parsed = parseDataUri(raw);
         if (parsed) addRef(ctx, { dataUri: parsed, tag: 'inferred', attr: origin + ':' + k, provenance: 'json', hint: 'image', line });
@@ -823,7 +872,7 @@ function collectLooseUrls(text, baseUrl, ctx, line, where) {
   let guard = 0;
   while ((m = re.exec(text)) && guard++ < 3200) {
     const raw = m[0].replace(/[).,;:']+$/, '');
-    if (raw.startsWith('data:') || raw.length < 6) continue;
+    if (isDataUri(raw) || raw.length < 6) continue;
     // 相对写法必须带路径分隔符：链接文字里光秃秃的文件名（"inventory.csv"）不是资源引用
     if (!/^(?:https?:)?\/\//i.test(raw) && raw.indexOf('/') < 0) continue;
     const u = normalizeUrl(raw, baseUrl);
@@ -834,6 +883,9 @@ function collectLooseUrls(text, baseUrl, ctx, line, where) {
     addRef(ctx, { url: u, tag: 'inferred', attr: where || 'text', provenance: 'inferred', hint: typeFromExt(ext), line: line || 0 });
   }
 }
+
+/** data: 的方案名大小写不敏感（RFC 2397），判定统一走这里 */
+function isDataUri(s) { return /^data:/i.test(String(s == null ? '' : s)); }
 
 function parseDataUri(raw) {
   const rest = String(raw).slice(5);
@@ -891,6 +943,8 @@ function mergeResources(list) {
       if (!existing.viaProxy && r.viaProxy) existing.viaProxy = r.viaProxy;
       existing.sprite = existing.sprite || !!r.sprite;
       if (!existing.declaredHeight && r.declaredHeight) existing.declaredHeight = r.declaredHeight;
+      /* 区域：同一地址只要有一处落在正文 / 未定性区域，就不算「内容区之外」 */
+      mergeZone(existing, r);
       continue;
     }
     const hinted = r.hint && r.hint !== 'media' && r.hint !== 'link' ? r.hint : null;
@@ -925,12 +979,35 @@ function mergeResources(list) {
       fontFormat: r.fontFormat || '',
       metaKey: r.metaKey || '',
       imageSet: !!r.imageSet,
+      zone: r.zone || 'content',
+      zoneKind: r.zoneKind || '',
+      zoneSoft: r.zoneSoft === true,
+      zoneAlso: '',
     });
   }
   const arr = [...map.values()];
   arr.sort((a, b) => rank(a) - rank(b) || a.type.localeCompare(b.type) || String(a.url).localeCompare(String(b.url)));
   arr.forEach((r, i) => { r.index = i + 1; });
   return arr;
+}
+
+/** 本页各区域的引用 / 文案计数：扫描日志、统计面板与自检都用它 */
+function regionSummary(refs, blocks) {
+  const kinds = {};
+  const bump = (k) => { const key = k || 'other'; kinds[key] = (kinds[key] || 0) + 1; };
+  const out = { refs: { main: 0, content: 0, noise: 0 }, texts: { main: 0, content: 0, noise: 0 }, kinds, noiseRefs: 0, noiseTexts: 0 };
+  for (const r of refs || []) {
+    const z = r.zone === 'noise' ? 'noise' : (r.zone === 'main' ? 'main' : 'content');
+    out.refs[z]++;
+    if (z === 'noise') { out.noiseRefs++; bump(r.zoneKind); }
+  }
+  for (const b of blocks || []) {
+    const z = b.zone === 'noise' ? 'noise' : (b.zone === 'main' ? 'main' : 'content');
+    out.texts[z]++;
+    if (z === 'noise') out.noiseTexts++;
+  }
+  out.kindText = kindsLabel(Object.keys(kinds).filter((k) => kinds[k] > 0));
+  return out;
 }
 
 function rank(r) {

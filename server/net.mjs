@@ -185,16 +185,26 @@ export function readCacheBuffer(url) {
   try { return fs.readFileSync(cachePath(url)); } catch { return null; }
 }
 
-export async function writeCache(url, { buffer, contentType, status, finalUrl, name }) {
+export async function writeCache(url, { buffer, contentType, status, finalUrl, name, truncated }) {
   if (!buffer || buffer.length > MAX_ASSET_BYTES) return false;
   try {
     await fsp.writeFile(cachePath(url), buffer);
     await fsp.writeFile(cacheMetaPath(url), JSON.stringify({
       savedAt: Date.now(), contentType: contentType || '', status: status || 200,
       finalUrl: finalUrl || url, bytes: buffer.length, name: name || '',
+      truncated: !!truncated,
     }));
     return true;
   } catch { return false; }
+}
+
+/** 读取缓存里的原始字节（含 meta）；未命中或过期返回 null */
+export function readCached(url) {
+  const hit = readCacheMeta(url);
+  if (!hit) return null;
+  const buffer = readCacheBuffer(url);
+  if (!buffer || !buffer.length) return null;
+  return { buffer, meta: hit.meta };
 }
 
 /** 取得资源完整字节：优先缓存 */

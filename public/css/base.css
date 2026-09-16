@@ -2,13 +2,17 @@
 :root {
   --bg: #05070a;
   --bg-2: #070b10;
-  --panel: rgba(13, 19, 26, 0.66);
-  --panel-2: rgba(18, 25, 34, 0.55);
-  --line: rgba(255, 255, 255, 0.075);
-  --line-strong: rgba(255, 255, 255, 0.16);
-  --ink: #e9f0f8;
-  --muted: #96a3b4;
-  --dim: #738296;
+  --panel: rgba(13, 19, 26, 0.74);
+  --panel-2: rgba(18, 25, 34, 0.68);
+  --line: rgba(255, 255, 255, 0.105);
+  --line-strong: rgba(255, 255, 255, 0.19);
+
+  /* 深色模式的文字色板：按「最小号字也要够读」定档 ——
+     半透明面板合成后（≈#0b1016）实测：--ink 17.9:1、--muted 11.1:1、--dim 7.8:1，都过 WCAG AAA(7:1)；
+     旧的 --dim #738296 只有 4.9:1，是「文字太浅」的主因。改这三个值时请连带复核，别再用比 --dim 更浅的灰做正文。 */
+  --ink: #f4f8fd;
+  --muted: #bcc9d8;
+  --dim: #9aa9bd;
   --lime: #b8ff3c;
   --cyan: #4ad9ff;
   --pink: #ff6ec7;
@@ -135,8 +139,8 @@ body[data-cursor="down"] .cursor-ring { width: 22px; height: 22px; }
 .mark s {
   text-decoration: none;
   font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.34em;
+  font-size: 11px;
+  letter-spacing: 0.3em;
   color: var(--dim);
   text-transform: uppercase;
   transform: translateY(-0.7em);
@@ -145,8 +149,8 @@ body[data-cursor="down"] .cursor-ring { width: 22px; height: 22px; }
   display: flex;
   gap: 1.6rem;
   font-family: var(--mono);
-  font-size: 10.5px;
-  letter-spacing: 0.22em;
+  font-size: 11.5px;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--dim);
 }
@@ -182,15 +186,16 @@ body[data-mode="work"] .hero { padding: 0.8rem 0 0.4rem; }
 .hero h1 .thin {
   font-weight: 200;
   font-style: italic;
-  color: var(--muted);
+  color: rgba(244, 248, 253, 0.72);
   letter-spacing: -0.02em;
 }
 .hero h1 .hl { color: var(--lime); }
 .hero .sub {
-  max-width: 46ch;
+  max-width: 52ch;
   margin-top: 1.1rem;
   color: var(--muted);
-  font-size: clamp(0.9rem, 1.35vw, 1.06rem);
+  font-size: clamp(0.95rem, 1.4vw, 1.1rem);
+  line-height: 1.8;
 }
 body[data-mode="work"] .hero .sub { display: none; }
 body[data-mode="work"] .hero h1 { font-size: clamp(1.5rem, 3.4vw, 2.5rem); }
@@ -202,3 +207,36 @@ body[data-mode="work"] .hero h1 { font-size: clamp(1.5rem, 3.4vw, 2.5rem); }
   *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
   .layer-grain { animation: none; }
 }
+
+/* ================= 扫描区域（页眉 / 导航 / 页脚…）================= */
+.flag.zoneout { color: #b79cff; border-color: rgba(183, 156, 255, 0.45); background: rgba(28, 18, 46, 0.8); }
+/* 只凭 class / id 命名判定的区域：紫色换成琥珀色虚线边，暗示这是推断结果 */
+.flag.zoneout.soft { color: #f0c98b; border-color: rgba(240, 201, 139, 0.5); border-style: dashed; }
+.card.zone-noise .thumb { filter: saturate(0.55); }
+.card.zone-noise::after {
+  content: '不在扫描范围'; position: absolute; left: 10px; bottom: 10px; z-index: 5;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; color: #b79cff;
+  background: rgba(10, 8, 20, 0.86); border: 1px solid rgba(183, 156, 255, 0.4); padding: 1px 6px; border-radius: 2px;
+  opacity: 0; transform: translateY(4px); transition: opacity 0.25s var(--ease), transform 0.25s var(--ease);
+}
+.card.zone-noise:hover::after { opacity: 1; transform: none; }
+.card.zone-noise.soft::after {
+  content: '按命名推断 · 不在扫描范围'; color: #f0c98b; border-color: rgba(240, 201, 139, 0.45); border-style: dashed;
+}
+.trow .zchip {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em; color: #b79cff;
+  border: 1px solid rgba(183, 156, 255, 0.36); border-radius: 2px; padding: 0 4px;
+}
+.trow .zchip.main { color: #7cf6b0; border-color: rgba(124, 246, 176, 0.32); }
+
+/* Shift 连选提示：卡片右上角，悬停浮现 */
+.card .shift-hint {
+  position: absolute; right: 8px; top: 8px; z-index: 5; pointer-events: none;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em; color: var(--muted);
+  background: rgba(6, 9, 12, 0.82); border: 1px solid var(--line-strong); border-radius: 2px; padding: 1px 5px;
+  opacity: 0; transform: translateY(-3px); transition: opacity 0.22s var(--ease), transform 0.22s var(--ease);
+}
+.card:hover .shift-hint, .grid.list .card:hover .shift-hint { opacity: 1; transform: none; }
+.grid.list .card .shift-hint { right: auto; left: 8px; top: auto; bottom: 8px; }
+.tick:active { transform: scale(0.86); }
+.shift-key { font-family: var(--mono); color: var(--ink); border: 1px solid var(--line-strong); border-radius: 2px; padding: 0 4px; }

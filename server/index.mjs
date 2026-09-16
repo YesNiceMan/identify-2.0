@@ -8,7 +8,10 @@ import {
   purgeCache, filenameFromUrl, hostOf,
 } from './net.mjs';
 import { createJob, getJob, listJobs, subscribe, formatBytes, reprobeItems, jobCount, inlineAsset } from './scan.mjs';
+import { regionLabel, kindsLabel } from './region.mjs';
 import { ZipWriter } from './zip.mjs';
+import { buildPreview, loadDoc, passthroughType, previewPages } from './preview.mjs';
+import { readCached } from './net.mjs';
 
 const server = http.createServer((req, res) => {
   handle(req, res).catch((err) => {
@@ -46,6 +49,8 @@ async function handle(req, res) {
     }
     if (p === '/api/proxy') return apiProxy(req, res, url);
     if (p === '/api/inline') return apiInline(res, url);
+    if (p === '/api/preview') return apiPreview(req, res, url);
+    if (p === '/api/preview/pages') return apiPreviewPages(res, url);
     return json(res, 404, { error: 'not found' });
   }
 
@@ -90,6 +95,8 @@ async function apiScan(req, res) {
     infer: body.infer !== false,
     includeIcons: body.includeIcons === true,
     includeTech: body.includeTech === true,
+    /* 默认只扫描主体内容区（页眉 / 导航菜单 / 页脚 / 侧栏 / 表单 / 挂件之外的引用） */
+    mainOnly: body.mainOnly !== false,
     crawlPages: body.crawlPages,
     maxResources: body.maxResources,
   });
@@ -212,6 +219,85 @@ function serveFileBytes(req, res, { file, type, name, download, range, size }) {
   fs.createReadStream(file).pipe(res);
 }
 
+/* -------------------------------------------------------- 页面预览 */
+
+/**
+ * 预览文档的兜底 CSP：页面自己的脚本已在生成阶段整段剥离，这里再禁一次；
+ * 图片 / 样式 / 字体 / 媒体仍指向站点原地址，保证「看到的就是原始页面」。
+ */
+const PREVIEW_CSP = [
+  "script-src 'none'", "object-src 'none'", "frame-src 'none'", "worker-src 'none'",
+  "connect-src 'none'", "form-action 'none'", "img-src * data: blob:",
+  "style-src * 'unsafe-inline' data: blob:", "font-src * data: blob:", "media-src * data: blob:",
+].join('; ');
+
+async function apiPreview(req, res, url) {
+  const job = getJob(url.searchParams.get('job'));
+  if (!job) return json(res, 404, { code: 'NO_JOB', message: '任务不存在或已过期，请重新扫描' });
+  const pages = previewPages(job);
+  const want = normalizeUrl(url.searchParams.get('page') || '') || '';
+  const entry = want ? pages.find((pg) => pg.url === want) : (pages.find((pg) => pg.main) || pages[0]);
+  if (!entry) return json(res, 403, { code: 'NO_PAGE', message: '这个地址不在本次扫描的页面里' });
+  const target = normalizeUrl(entry.url) || job.url;
+  const doc = await loadDoc(target, job.url);
+  const headers = {
+    'cache-control': 'no-store',
+    'content-security-policy': PREVIEW_CSP,
+    'x-content-type-options': 'nosniff',
+    /* 只允许本站自己嵌；第三方就算 frame 进来也读不到 */
+    'x-frame-options': 'SAMEORIGIN',
+    'x-idv-base': encodeURIComponent(target),
+    'x-idv-truncated': doc.truncated ? '1' : '0',
+  };
+  if (doc.error) {
+    const buf = Buffer.from(shellNotice('无法载入预览', doc.error, target), 'utf-8');
+    res.writeHead(200, Object.assign({}, headers, {
+      'content-type': 'text/html; charset=utf-8', 'content-length': String(buf.length), 'x-idv-error': encodeURIComponent(doc.error),
+    }));
+    res.end(buf);
+    return;
+  }
+  const kind = passthroughType(doc.contentType);
+  let payload;
+  if (kind === 'text/html') {
+    payload = Buffer.from(buildPreview(doc.text, target, { jobUrl: job.url, truncated: doc.truncated }), 'utf-8');
+  } else if (kind) {
+    /* PDF / 图片 / 音视频：把原始字节交给浏览器自己渲染，一个字节都不动 */
+    payload = doc.buffer;
+    headers['content-type'] = kind;
+    headers['cache-control'] = 'private, max-age=600';
+  } else {
+    payload = Buffer.from(shellNotice('这个地址不是可视化页面', String(doc.contentType || '未知类型') + ' · 无法生成页面预览', target), 'utf-8');
+    headers['content-type'] = 'text/html; charset=utf-8';
+  }
+  if (!headers['content-type']) headers['content-type'] = 'text/html; charset=utf-8';
+  headers['content-length'] = String(payload.length);
+  res.writeHead(200, headers);
+  if (req.method === 'HEAD') { res.end(); return; }
+  res.end(payload);
+}
+
+function apiPreviewPages(res, url) {
+  const job = getJob(url.searchParams.get('job'));
+  if (!job) return json(res, 404, { error: 'job not found' });
+  const result = job.result || job.partial || {};
+  return json(res, 200, {
+    job: job.id,
+    url: job.url,
+    preview: (result.doc && result.doc.preview) || 'ready',
+    pages: previewPages(job),
+  });
+}
+
+function shellNotice(title, detail, target) {
+  const esc2 = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>' + esc2(title) + '</title>'
+    + '<style>body{margin:0;min-height:100vh;display:grid;place-content:center;gap:.6rem;text-align:center;'
+    + 'background:#0a0e13;color:#eaf1f8;font:15px/1.7 -apple-system,"PingFang SC",sans-serif;padding:2rem}'
+    + 'b{font-size:1.1rem;letter-spacing:.02em}span{color:#a9b8c9;font:12px/1.8 ui-monospace,Menlo,monospace;word-break:break-all}</style></head>'
+    + '<body><b>' + esc2(title) + '</b><span>' + esc2(detail) + '</span><span>' + esc2(target) + '</span></body></html>';
+}
+
 function apiInline(res, url) {
   const entry = inlineAsset(url.searchParams.get('job'), url.searchParams.get('id'));
   if (!entry) { json(res, 404, { error: '内联资源不存在或任务已过期' }); return; }
@@ -298,6 +384,10 @@ async function apiBundle(req, res) {
         camera: item.camera || '',
         sprite: item.sprite || item.symbols ? '精灵图' : '',
         rescued: item.rescued || '',
+        zone: item.zone === 'noise'
+          ? '非内容区（' + regionLabel(item.zoneKind) + (item.zoneSoft ? '·按命名推断' : '') + '）'
+          : (item.zone === 'main' ? '主体内容区' : '未定性'),
+        zoneAlso: item.zoneAlso ? kindsLabel(String(item.zoneAlso).split(/\s+/)) : '',
       });
     }
     await zip.add(rootName + '/_manifest.json', JSON.stringify(manifest, null, 2));
@@ -305,7 +395,14 @@ async function apiBundle(req, res) {
     if (body.withText !== false) {
       const blocks = (job.result && job.result.textBlocks) || [];
       if (blocks.length) {
-        await zip.add(rootName + '/_文案/正文.md', textMarkdown(job, blocks));
+        /* 页面框架里的文字（页眉 / 导航 / 页脚…）另存一份，默认那份只给正文与未定性 */
+        const inMain = blocks.filter((b) => b.zone !== 'noise');
+        const outMain = blocks.filter((b) => b.zone === 'noise');
+        await zip.add(rootName + '/_文案/正文.md', textMarkdown(job, inMain));
+        if (outMain.length) {
+          await zip.add(rootName + '/_文案/正文外.md',
+            textMarkdown(job, outMain, '以下文字位于页眉 / 导航菜单 / 页脚 / 侧栏 / 表单 / 挂件，不属于主体内容区；' + '仍保留以便核对识别结果。'));
+        }
         await zip.add(rootName + '/_文案/文案.csv', textCsv(blocks));
         await zip.add(rootName + '/_文案/文案.json', JSON.stringify(blocks.map(pickText), null, 2));
       }
@@ -397,6 +494,14 @@ function readme(job, items, label) {
   const opts = job.options || {};
   lines.push('');
   lines.push('扫描策略 : ' + (opts.includeIcons ? '包含 UI 图标' : '不含 UI 图标') + ' · ' + (opts.includeTech ? '包含字体/样式表/脚本/数据' : '不含字体 / 样式表 / 脚本 / 数据'));
+  lines.push('扫描区域 : ' + (opts.mainOnly === false ? '整个页面（含页眉 / 导航菜单 / 页脚 / 侧栏）' : '主体内容区（页眉 / 导航菜单 / 页脚 / 侧栏 / 表单 / 挂件不扫描）'));
+  if (result.region) {
+    const rg = result.region;
+    lines.push('区域统计 : 页面引用 正文 ' + (rg.refs.main || 0) + ' · 未定性 ' + (rg.refs.content || 0) + ' · 正文外 ' + (rg.refs.noise || 0)
+      + (rg.mainOnly === false ? '（未排除）' : '（已排除 ' + (rg.skipped || 0) + ' 项）')
+      + ' · 文案 正文 ' + (rg.texts.main || 0) + ' / 正文外 ' + (rg.texts.noise || 0));
+    if ((rg.pages || 1) > 1) lines.push('           : 区域判定覆盖 ' + rg.pages + ' 个页面');
+  }
   if (result.filtered && result.filtered.length) {
     const sum = result.stats && result.stats.filtered ? result.stats.filtered : null;
     lines.push('被排除   : ' + result.filtered.length + ' 项（默认不扫描、不请求）');
@@ -410,7 +515,11 @@ function readme(job, items, label) {
     }
     if (result.filtered.length > shown.length) lines.push('  … 其余 ' + (result.filtered.length - shown.length) + ' 项略');
     lines.push('');
-    lines.push('     如需这些资源，回到扫描台打开「UI 图标」「技术资源」两个开关重新扫描。');
+    const hint = [];
+    if (result.filtered.some((f) => f.reason === 'icon')) hint.push('「UI 图标」');
+    if (result.filtered.some((f) => ['font', 'stylesheet', 'script', 'data', 'page', 'other'].indexOf(f.reason) >= 0)) hint.push('「技术资源」');
+    if (result.filtered.some((f) => f.reason === 'region')) hint.push('「扫描页眉 / 导航 / 页脚」');
+    if (hint.length) lines.push('     如需这些资源，回到扫描台打开' + hint.join('') + '开关重新扫描。');
   } else {
     lines.push('被排除   : 0 项');
   }
@@ -421,14 +530,14 @@ function manifestCsv(manifest) {
   const head = [
     '序号', '类型', '文件名', '体积(字节)', '宽', '高', '时长(秒)', '页数', '页面尺寸', '文档标题', '作者 / 艺人',
     '专辑', '年份', '流派', '采样率', '声道', '帧率', '编解码', '播放列表', '字体', '相机', '精灵图',
-    '声明尺寸', '声明来源', '地址后缀修正', '识别格式', 'MIME', '原始 URL',
+    '声明尺寸', '声明来源', '地址后缀修正', '识别格式', '所在区域', '也被非内容区引用', 'MIME', '原始 URL',
   ];
   const rows = manifest.files.map((f, i) => [
     i + 1, (TYPES[f.type] || {}).label || f.type || '', f.name || '', f.bytes != null ? f.bytes : (f.size || ''),
     f.width || '', f.height || '', f.duration || '', f.pages || '', f.page || '', f.docTitle || '', f.docAuthor || '',
     f.album || '', f.year || '', f.genre || '', f.sampleRate || '', f.channels || '', f.frameRate || '', f.codec || '',
     f.playlist || '', f.fonts || '', f.camera || '', f.sprite || '', f.declaredSize || '',
-    f.rescued ? '按内容线索补探测（' + f.rescued + '）' : '', f.extCorrected || '', f.signature || '', f.mime || '', f.url || '',
+    f.rescued ? '按内容线索补探测（' + f.rescued + '）' : '', f.extCorrected || '', f.signature || '', f.zone || '', f.zoneAlso || '', f.mime || '', f.url || '',
   ]);
   return '\ufeff' + [head].concat(rows).map((r) => r.map(csvCell).join(',')).join('\r\n');
 }
@@ -439,13 +548,20 @@ function csvCell(v) {
 }
 
 function pickText(b) {
-  return { tag: b.tag, level: b.level, zone: b.zone, chars: b.chars, words: b.words, line: b.line, text: b.text };
+  return {
+    tag: b.tag, level: b.level, zone: b.zone,
+    zoneLabel: b.zone === 'noise'
+      ? regionLabel(b.zoneKind) + (b.zoneSoft ? '（按命名推断）' : '')
+      : (b.zone === 'main' ? '主体内容区' : '未定性'),
+    chars: b.chars, words: b.words, line: b.line, text: b.text,
+  };
 }
 
-function textMarkdown(job, blocks) {
+function textMarkdown(job, blocks, note) {
   const lines = ['# ' + ((job.result && job.result.doc && job.result.doc.title) || job.url), ''];
   lines.push('> 来源：' + job.url);
   lines.push('> 导出时间：' + new Date().toLocaleString('zh-CN'));
+  if (note) lines.push('> ' + note);
   lines.push('');
   for (const b of blocks) {
     if (b.level) lines.push('#'.repeat(b.level) + ' ' + b.text);
@@ -461,7 +577,7 @@ function textMarkdown(job, blocks) {
 
 function textCsv(blocks) {
   const head = ['序号', '标签', '级别', '区域', '字数', '词数', '行号', '内容'];
-  const rows = blocks.map((b, i) => [i + 1, b.tag, b.level || '', b.zone || '', b.chars, b.words, b.line || '', b.text]);
+  const rows = blocks.map((b, i) => { const t = pickText(b); return [i + 1, b.tag, b.level || '', t.zoneLabel, b.chars, b.words, b.line || '', b.text]; });
   return '\ufeff' + [head].concat(rows).map((r) => r.map(csvCell).join(',')).join('\r\n');
 }
 

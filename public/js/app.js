@@ -1,13 +1,17 @@
 import { $, $$, el, esc, bytesText, fmtMs, fmtNum, debounce, TYPES } from './util.js';
 import { startScan, streamJob, loadJob, bundle, exportText, reprobe, api, proxySrc } from './api.js';
 import {
-  state, reset, putResource, putItems, putTexts, toggle, toggleText,
-  selectedItems, visibleItems, totals,
+  state, reset, putResource, putItems, putTexts, toggle, toggleText, clearSelection, pickSelection, visibleOrder,
+  selectedItems, visibleItems, visibleTexts, totals,
 } from './store.js';
 import {
   mount, renderSpectre, renderTabs, renderStage, appendCard, renderDock,
   detailHtml, textDetailHtml, renderPolicy, policyModalHtml,
 } from './views.js';
+import {
+  renderPreviewStage, previewMounted, disposePreview, reloadPreview,
+  refreshPreviewSelection, locateInPreview, setPreviewMode, mountPreview,
+} from './preview.js';
 import { Radar } from './radar.js';
 import { initCursor, initReveal, initScrambles, initMagnetic, attachTilt, flip, toast, scrollTo } from './fx.js';
 
@@ -35,6 +39,7 @@ let modalItem = null;
 let modalBlock = null;
 let presetType = null;
 let presetApplied = false;
+let pendingStage = null;
 
 /* ============================================================ 启动 */
 
@@ -46,10 +51,20 @@ async function boot() {
   wireConsole();
   restoreSwitches();
   wireFilters();
+  wireStageSeg();
   wireDock();
   wireModal();
   wireKeys();
   mount(handlers);
+  mountPreview({
+    onExport: (spec) => doExport(spec),
+    onExportText: (spec) => doExportText(spec),
+    onOpen: (item) => openModal(detailHtml(item), item, null),
+    onOpenText: (block) => openModal(textDetailHtml(block), null, block),
+    onToast: toast,
+    onSelectionChange: afterSelection,
+    onShowCards: showCards,
+  });
   renderSpectre();
   renderTabs();
   renderStage();
@@ -73,6 +88,7 @@ async function boot() {
   const params = new URLSearchParams(location.search);
   const wanted = params.get('job');
   const preset = params.get('type');
+  if (params.get('stage') === 'preview') pendingStage = 'preview';
   if (preset && (TYPES[preset] || preset === 'text')) {
     presetType = preset;
     history.replaceState({}, '', location.pathname + (wanted ? '?job=' + wanted + '&type=' + preset : '?type=' + preset));
@@ -119,6 +135,7 @@ function renderPresets() {
 
 async function loadExisting(jobId, url) {
   reset();
+  retirePreview();
   state.job = jobId;
   state.url = url;
   document.body.dataset.mode = 'work';
@@ -140,21 +157,23 @@ async function loadExisting(jobId, url) {
 const handlers = {
   onType: (key) => {
     state.filter.type = state.filter.type === key ? 'all' : key;
+    if (state.stage === 'preview') setPreviewMode(state.filter.type === 'text' ? 'text' : 'res');
     repaint();
     scrollTo($('#results'), 12);
   },
   onQuery: debounce((q) => { state.filter.q = q; repaint(); }, 200),
   onSort: () => repaint(),
   onView: () => repaint(),
-  onSelect: (item, node) => {
-    toggle(item.id);
-    node.classList.toggle('sel', state.sel.has(item.id));
-    afterSelection();
+  /* 勾选：普通点击切换；按住 Shift 点击 = 从上次勾选处**连续多选**（整段区间并入） */
+  onSelect: (item, node, ev) => {
+    const r = pickSelection(visibleOrder(), item.id, !!(ev && ev.shiftKey), 'res');
+    paintPicked(r.ids, 'res');
+    afterSelection(r);
   },
-  onSelectText: (block, node) => {
-    toggleText(block.id);
-    node.classList.toggle('sel', state.selText.has(block.id));
-    afterSelection();
+  onSelectText: (block, node, ev) => {
+    const r = pickSelection(visibleOrder(), block.id, !!(ev && ev.shiftKey), 'text');
+    paintPicked(r.ids, 'text');
+    afterSelection(r);
   },
   onOpen: (item) => openModal(detailHtml(item), item, null),
   onPolicy: (reason) => openModal(policyModalHtml(reason), null, null),
@@ -184,16 +203,37 @@ const handlers = {
   onExport: (spec) => doExport(spec),
   onExportText: (spec) => doExportText(spec),
   onTilt: attachTilt,
+  onLocate: (id, kind) => {
+    setStage('preview');
+    setPreviewMode(kind === 'text' ? 'text' : 'res');
+    locateInPreview(id);
+  },
 };
 
 async function copy(text) {
   try { await navigator.clipboard.writeText(text); return true; } catch { return false; }
 }
 
-function afterSelection() {
+/** 只改勾选状态相关的 class，不重排列表（Shift 连选一次可能涉及上百项） */
+function paintPicked(ids, kind) {
+  const text = kind === 'text';
+  const set = text ? state.selText : state.sel;
+  for (const id of ids || []) {
+    const node = $(text ? '.trow[data-textid="' + String(id).replace(/[^\w-]/g, '') + '"]' : '.card[data-id="' + String(id).replace(/[^\w-]/g, '') + '"]');
+    if (node) node.classList.toggle('sel', set.has(id));
+  }
+  refreshPreviewSelection();
+}
+
+function afterSelection(r) {
   renderDock();
   const t = totals();
-  $('#tool-note').textContent = state.resources.length ? ('已选 ' + state.sel.size + ' · 显示 ' + visibleItems().length + ' / ' + t.total) : '';
+  const note = $('#tool-note');
+  if (r && r.mode === 'range') {
+    note.textContent = 'Shift 连续多选 · 区间 ' + r.ids.length + ' 项（新增 ' + r.added + '）· 已选 ' + state.sel.size + ' / ' + state.selText.size + ' 段';
+    return;
+  }
+  note.textContent = state.resources.length ? ('已选 ' + state.sel.size + ' · 显示 ' + visibleItems().length + ' / ' + t.total) : '';
 }
 
 /* ============================================================ 扫描 */
@@ -221,6 +261,7 @@ async function run(raw) {
   }
   if (closeStream) { closeStream(); closeStream = null; }
   reset();
+  retirePreview();
   state.url = url;
   state.scanning = true;
   refsCount = 0;
@@ -228,8 +269,10 @@ async function run(raw) {
   const infer = $('#opt-infer').checked;
   const includeIcons = $('#opt-icons').checked;
   const includeTech = $('#opt-tech').checked;
+  /* 勾选「扫描页眉 / 导航 / 页脚」= 整页扫描；不勾 = 只扫描主体内容区 */
+  const mainOnly = !($('#opt-region') && $('#opt-region').checked);
   const crawlPages = Number($('#opt-crawl').textContent) || 0;
-  state.options = { deep, infer, includeIcons, includeTech, crawlPages };
+  state.options = { deep, infer, includeIcons, includeTech, mainOnly, crawlPages };
   saveSwitches();
   document.body.dataset.mode = 'work';
   $('#results').hidden = false;
@@ -252,7 +295,7 @@ async function run(raw) {
   renderStage();
   renderDock();
   try {
-    const r = await startScan({ url: url, deep: deep, infer: infer, includeIcons: includeIcons, includeTech: includeTech, crawlPages: crawlPages });
+    const r = await startScan({ url: url, deep: deep, infer: infer, includeIcons: includeIcons, includeTech: includeTech, mainOnly: mainOnly, crawlPages: crawlPages });
     state.job = r.job;
     subscribe(r.job);
   } catch (e) {
@@ -276,6 +319,15 @@ function subscribe(jobId) {
       $('#c-text').textContent = fmtNum(d.text || 0);
       $('#scope-target').textContent = (state.doc.title ? state.doc.title + ' · ' : '') + state.url;
       addLine({ kind: 'info', msg: '页面 ' + (state.doc.host || '') + ' · ' + fmtNum(d.refs) + ' 个引用 · ' + fmtNum(d.headings) + ' 个标题' }, '结构');
+      if (d.regions) {
+        const rg = d.regions;
+        addLine({
+          kind: 'info',
+          msg: '区域划分 · 正文引用 ' + fmtNum(rg.refs.main) + ' · 未定性 ' + fmtNum(rg.refs.content)
+            + ' · 非内容区 ' + fmtNum(rg.refs.noise) + (rg.kindText ? '（' + rg.kindText + '）' : '')
+            + ' · 文案 正文 ' + fmtNum(rg.texts.main) + ' / 区外 ' + fmtNum(rg.texts.noise),
+        }, '区域');
+      }
     },
     item: (d) => {
       const item = d.item || d;
@@ -326,7 +378,7 @@ function addLine(d) {
     const batch = lineQueue.slice(-24);
     lineQueue = [];
     for (const item of batch) {
-      const t = new Date(item.t || Date.now());
+      const t = new Date(item.at || Date.now());
       frag.appendChild(el('p', {
         class: item.kind || 'info',
         html: '<span class="t">' + t.toLocaleTimeString('zh-CN', { hour12: false }) + '</span>' + esc(item.msg || ''),
@@ -382,6 +434,8 @@ function applyResult(result, status) {
     presetApplied = true;
   }
   repaint();
+  if (state.stage === 'preview') reloadPreview();
+  if (pendingStage) { const s = pendingStage; pendingStage = null; setTimeout(() => setStage(s), 120); }
   radar.setMode('result');
   radar.burst(0.5, 0.45);
   const t = totals();
@@ -409,6 +463,64 @@ function finishScan() {
   if (closeStream) { closeStream(); closeStream = null; }
 }
 
+/* ============================================================ 展台 / 预览 */
+
+function applyStage() {
+  document.body.dataset.stage = state.stage;
+  $$('#stage-seg button').forEach((b) => b.classList.toggle('on', b.dataset.stage === state.stage));
+  const host = $('#preview-stage');
+  if (!host) return;
+  if (state.stage === 'preview') {
+    /* 「只看已选」属于展台：进预览先放开，否则叠加层会空掉，选择动作也会扑空 */
+    if (state.filter.onlySel) {
+      state.filter.onlySel = false;
+      const cb = $('#only-selected');
+      if (cb) cb.checked = false;
+    }
+    if (!previewMounted(state.job)) renderPreviewStage(host);
+    host.hidden = false;
+    refreshPreviewSelection();
+  } else {
+    host.hidden = true;
+    renderStage();
+  }
+}
+
+function setStage(next) {
+  if (next !== 'preview' && next !== 'list') return;
+  if (state.stage === next) return;
+  state.stage = next;
+  applyStage();
+  if (next === 'preview') scrollTo($('#results'), 10);
+}
+
+function retirePreview() {
+  disposePreview();
+  state.stage = 'list';
+  document.body.dataset.stage = 'list';
+  const host = $('#preview-stage');
+  if (host) { host.hidden = true; host.innerHTML = ''; }
+}
+
+/** 预览里框选完，回到展台核对 */
+function showCards(ids) {
+  setStage('list');
+  state.filter.onlySel = true;
+  const box = $('#only-selected');
+  if (box) box.checked = true;
+  repaint();
+  scrollTo($('#results'), 8);
+  const first = (ids || [])[0];
+  if (first != null) {
+    const node = $('.card[data-id="' + String(first).replace(/[^\w-]/g, '') + '"]');
+    if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+}
+
+function wireStageSeg() {
+  $$('#stage-seg button').forEach((b) => b.addEventListener('click', () => setStage(b.dataset.stage)));
+}
+
 /* ============================================================ 筛选 */
 function repaint() {
   const stage = $('#stage-body');
@@ -418,6 +530,7 @@ function repaint() {
     renderSpectre();
   });
   if (state.view === 'grid' && stage) $$('.card', stage).forEach(attachTilt);
+  refreshPreviewSelection();
   afterSelection();
 }
 
@@ -436,7 +549,7 @@ function wireFilters() {
   $('#only-selected').addEventListener('change', (e) => { state.filter.onlySel = e.target.checked; repaint(); });
   $('#only-ok').addEventListener('change', (e) => { state.filter.onlyOk = e.target.checked; repaint(); });
   $('#only-original').addEventListener('change', (e) => { state.filter.onlyOriginal = e.target.checked; repaint(); });
-  ['#opt-icons', '#opt-tech'].forEach((s) => $(s).addEventListener('change', saveSwitches));
+  ['#opt-icons', '#opt-tech', '#opt-region'].forEach((s) => { if ($(s)) $(s).addEventListener('change', saveSwitches); });
 }
 
 /* 记住上次使用的扫描范围（只存这几个开关） */
@@ -449,6 +562,7 @@ function restoreSwitches() {
     if (typeof saved.infer === 'boolean' && $('#opt-infer')) $('#opt-infer').checked = saved.infer;
     if (typeof saved.includeIcons === 'boolean' && $('#opt-icons')) $('#opt-icons').checked = saved.includeIcons;
     if (typeof saved.includeTech === 'boolean' && $('#opt-tech')) $('#opt-tech').checked = saved.includeTech;
+    if (typeof saved.mainOnly === 'boolean' && $('#opt-region')) $('#opt-region').checked = !saved.mainOnly;
   } catch { /* 忽略 */ }
 }
 
@@ -459,6 +573,7 @@ function saveSwitches() {
       infer: $('#opt-infer').checked,
       includeIcons: $('#opt-icons').checked,
       includeTech: $('#opt-tech').checked,
+      mainOnly: $('#opt-region') ? !$('#opt-region').checked : true,
     }));
   } catch { /* 忽略 */ }
 }
@@ -477,8 +592,7 @@ function wireDock() {
     else doExport({ scope: 'all', label: '全部资源' });
   });
   $('#clear-sel').addEventListener('click', () => {
-    state.sel.clear();
-    state.selText.clear();
+    clearSelection();
     repaint();
     renderDock();
   });
@@ -513,13 +627,14 @@ async function doExport(spec) {
 
 async function doExportText(spec) {
   if (!state.job) return toast('还没有扫描结果', { error: true });
-  const useAll = spec.mode !== 'selected';
-  if (!useAll && !state.selText.size) return toast('先在「文字」页勾选段落', { error: true });
+  const ids = spec.ids && spec.ids.length ? spec.ids : null;
+  const useAll = !ids && spec.mode !== 'selected';
+  if (!ids && !useAll && !state.selText.size) return toast('先在「文字」页或预览里勾选段落', { error: true });
   try {
     const r = await exportText({
       job: state.job,
       format: spec.format,
-      ids: useAll ? undefined : Array.from(state.selText),
+      ids: ids || (useAll ? undefined : Array.from(state.selText)),
     });
     toast('文案已导出 <b>' + esc(r.name) + '</b> · ' + bytesText(r.bytes));
   } catch (e) {
@@ -565,8 +680,10 @@ function wireModal() {
   const modal = $('#modal');
   modal.addEventListener('click', (e) => {
     if (e.target === modal) return closeModal();
-    const btn = e.target.closest('[data-close],[data-copy],[data-open],[data-toggle],[data-retry],[data-copytext],[data-toggletext]');
+    const btn = e.target.closest('[data-close],[data-copy],[data-open],[data-toggle],[data-retry],[data-copytext],[data-toggletext],[data-locate],[data-locatetext]');
     if (!btn) return;
+    if (btn.hasAttribute('data-locate')) { closeModal(); handlers.onLocate(btn.dataset.locate, 'res'); return; }
+    if (btn.hasAttribute('data-locatetext')) { closeModal(); handlers.onLocate(btn.dataset.locatetext, 'text'); return; }
     if (btn.hasAttribute('data-close')) closeModal();
     else if (btn.hasAttribute('data-copy')) handlers.onCopy(modalItem);
     else if (btn.hasAttribute('data-copytext')) handlers.onCopyText(modalBlock);
@@ -602,8 +719,11 @@ function wireKeys() {
     const k = e.key.toLowerCase();
     if (e.key === '/') { e.preventDefault(); ($('#results').hidden ? $('#url') : $('#filter')).focus(); }
     else if (k === 'a') {
-      if (state.filter.type === 'text') state.texts.forEach((b) => state.selText.add(b.id));
+      /* 全选按「当前视图」口径；锚点清空，下一次点击重新定位 */
+      if (state.filter.type === 'text') visibleTexts().forEach((b) => state.selText.add(b.id));
       else visibleItems().forEach((r) => { if (r.status === 'ok') state.sel.add(r.id); });
+      state.anchor = null;
+      state.anchorText = null;
       repaint();
       renderDock();
     }
@@ -614,6 +734,7 @@ function wireKeys() {
     else if (k === 'g') $$('#view-seg button')[state.view === 'grid' ? 1 : 0].click();
     else if (k === 'x') $('#clear-sel').click();
     else if (k === 'i') $('#url').focus();
+    else if (k === 'p') setStage(state.stage === 'preview' ? 'list' : 'preview');
   });
 }
 

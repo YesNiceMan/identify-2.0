@@ -25,10 +25,22 @@ table{border-collapse:collapse;width:100%}
 th,td{border:1px solid #1e2733;padding:.5rem .7rem;text-align:left;font-size:.92rem}
 ul{padding-left:1.2rem}
 .inline-strip img{display:inline-block;width:118px;margin-right:8px;vertical-align:top}
+.site-nav,.sidebar,.share-links{max-width:56rem;margin:0 auto;padding:1.2rem 1.5rem;border-top:1px solid #16202b}
+.site-nav a{margin-right:1rem}
+.sidebar{display:flex;gap:1.2rem;align-items:flex-start;flex-wrap:wrap}
+.search-box input{width:16rem;background:#0b1016;color:#e7ecf3;border:1px solid #1e2733;padding:.4rem .6rem}
 </style>
 </head><body>
-<header style="padding:2rem 0 0"><img src="assets/logo-crest.svg" alt="IDENTIFY 标志" width="320" height="120"></header>
-<main>
+<header class="site-header" style="padding:2rem 0 0">
+<img src="assets/logo-crest.svg" alt="IDENTIFY 标志" width="320" height="120">
+<img src="assets/masthead-1600x400.png" alt="页眉横幅大图" width="1600" height="400">
+<form class="search-box" role="search" action="/samples/lab"><input name="q" placeholder="站内搜索"><img src="assets/nav-bullet-640x640.png" alt="搜索建议图" width="640" height="640"></form>
+</header>
+<nav class="site-nav" aria-label="主导航">
+<a href="#main">正文</a><a href="#grid">图片</a><a href="#media">视音频</a>
+<img src="assets/nav-bullet-640x640.png" alt="导航装饰" width="640" height="640">
+</nav>
+<main id="main">
 <p style="letter-spacing:.4em;color:#5c6472;font-size:.75rem">OFFLINE SPECIMEN · 001</p>
 <h1>资源标本馆</h1>
 <p>把这一页的地址填进扫描台，就能在没有外网的情况下看到完整的识别与导出流程：<strong>文字、图片、视音频、文档、字体、样式表、压缩包</strong>七类资源各就位。</p>
@@ -116,7 +128,16 @@ ul{padding-left:1.2rem}
 <p>资源识别、原尺寸导出、深度扫描、类型分组、失效标记、去重计数、清单文件、字节校验——这些词在样本页里各出现两次以上，便于检验关键词抽取。</p>
 <p>资源识别是入口，原尺寸导出是承诺。深度扫描负责把藏在样式表与脚本里的资源一并捞出，类型分组让批量导出变得可预期。</p>
 </main>
+<aside class="sidebar" aria-label="侧栏">
+<img src="assets/sidebar-promo-720x360.png" alt="侧栏推广图" width="720" height="360">
+<div><strong>侧栏订阅</strong><p>这一块在 main 之外：侧栏里的图片与文字都不属于主体内容区。</p></div>
+</aside>
+<div class="share-links">
+<a href="https://example.com/share?url=x">分享</a> · <a href="https://example.com/follow">关注</a>
+<img src="assets/promo-strip-1000x320.png" alt="分享条推广图" width="1000" height="320">
+</div>
 <footer style="padding:3rem 1.5rem;border-top:1px solid #16202b;color:#4d5765">
+<img src="assets/footer-crest-900x300.png" alt="页脚徽标大图" width="900" height="300">
 <p>样本页脚：这一段的文字位于 footer 区域内，扫描台会把它的区域标记为 noise，导出文案时可一键排除。</p>
 <nav><a href="#top">返回顶部</a> · <a href="/samples/lab">重新载入</a></nav>
 </footer>

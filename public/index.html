@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/console.css">
 <link rel="stylesheet" href="css/results.css">
+<link rel="stylesheet" href="css/preview.css">
 </head>
 <body data-mode="idle">
 <canvas id="radar-bg" aria-hidden="true"></canvas>
@@ -58,10 +59,11 @@
       <div class="opts">
         <label class="switch hl"><input type="checkbox" id="opt-icons"><span class="track"></span><span>扫描 UI 图标（favicon、图标精灵、小尺寸图）</span></label>
         <label class="switch hl"><input type="checkbox" id="opt-tech"><span class="track"></span><span>扫描技术资源（字体、样式表、脚本、数据）</span></label>
+        <label class="switch hl"><input type="checkbox" id="opt-region"><span class="track"></span><span>扫描页眉 / 导航 / 页脚（默认只扫描主体内容区）</span></label>
         <label class="switch"><input type="checkbox" id="opt-deep" checked><span class="track"></span><span>递归解析外链 CSS（含 @font-face / @import）</span></label>
         <label class="switch" style="opacity:.9"><span class="stepper" role="group" aria-label="站内顺带扫描页数"><button type="button" data-step="-1">−</button><span id="opt-crawl">0</span><button type="button" data-step="1">+</button></span><span>页顺带扫描站内链接</span></label>
         <label class="switch"><input type="checkbox" id="opt-infer" checked><span class="track"></span><span>采纳脚本/JSON 中的推断地址</span></label>
-        <div class="opts-note">默认只识别内容资源：图标与技术资源<b>不请求、不下载、不导出</b>。</div>
+        <div class="opts-note">默认只识别<b>主体内容区</b>里的内容资源：页眉 / 导航菜单 / 页脚 / 侧栏，以及图标与技术资源，<b>不请求、不下载、不导出</b>。</div>
         <div class="presets" id="presets"></div>
       </div>
 
@@ -119,6 +121,10 @@
             <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="7" cy="7" r="5"/><path d="M11 11 L15 15"/></svg>
             <input id="filter" type="search" placeholder="筛选名称 / 类型 / 主机" spellcheck="false">
           </label>
+          <div class="seg" id="stage-seg" title="展台卡片 / 原始页面预览（P）">
+            <button data-stage="list" class="on">展台</button>
+            <button data-stage="preview">页面预览</button>
+          </div>
           <div class="seg" id="view-seg">
             <button data-view="grid" class="on">网格</button>
             <button data-view="list">列表</button>
@@ -135,13 +141,15 @@
           <span class="tool-note" id="tool-note"></span>
         </div>
         <div id="stage-body"></div>
+        <div id="preview-stage" class="preview-stage" hidden></div>
       </div>
     </section>
   </main>
 
   <footer class="foot">
     <span>IDENTIFY 2.0 · 本地解析服务 · 不上传任何数据到第三方</span>
-    <span>快捷键 <span class="kbd">/</span> 定位 <span class="kbd">↵</span> 扫描 <span class="kbd">A</span> 全选 <span class="kbd">E</span> 导出 <span class="kbd">Esc</span> 关闭</span>
+    <span>快捷键 <span class="kbd">/</span> 定位 <span class="kbd">↵</span> 扫描 <span class="kbd">A</span> 全选 <span class="kbd">E</span> 导出 <span class="kbd">P</span> 页面预览 <span class="kbd">Esc</span> 关闭</span>
+    <span>多选 <span class="kbd">⇧</span>+点击 连续多选 <span class="kbd">⇧</span>+拖框 叠加区域</span>
   </footer>
 </div>
 

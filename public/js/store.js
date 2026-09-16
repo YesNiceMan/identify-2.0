@@ -17,9 +17,14 @@ export const state = {
   filteredOverflow: 0,
   sel: new Set(),
   selText: new Set(),
+  /* Shift 连续多选的锚点：上一次「单独勾选」的资源 / 文案 id */
+  anchor: null,
+  anchorText: null,
   filter: { type: 'all', q: '', onlySel: false, onlyOk: false, onlyOriginal: false },
   sort: 'index',
   view: 'grid',
+  /* 展台（卡片）还是页面预览（原始页面快照 + 可点选叠加层） */
+  stage: 'list',
   scanning: false,
   byId: new Map(),
   textById: new Map(),
@@ -59,10 +64,13 @@ export function reset() {
   state.filteredOverflow = 0;
   state.sel.clear();
   state.selText.clear();
+  state.anchor = null;
+  state.anchorText = null;
   state.byId = new Map();
   state.textById = new Map();
   state.filter = { type: 'all', q: '', onlySel: false, onlyOk: false, onlyOriginal: false };
   state.scanning = false;
+  state.pages = [];
 }
 
 export function toggle(id) {
@@ -73,6 +81,61 @@ export function toggle(id) {
 export function toggleText(id) {
   if (state.selText.has(id)) state.selText.delete(id);
   else state.selText.add(id);
+}
+
+export function clearSelection() {
+  state.sel.clear();
+  state.selText.clear();
+  state.anchor = null;
+  state.anchorText = null;
+}
+
+/* -------------------------------------------------------- 连续多选 */
+
+/** 当前视图里资源 / 文案的可见顺序（Shift 连选就按这个顺序取区间） */
+export function visibleOrder() {
+  return state.filter.type === 'text' ? visibleTexts().map((b) => b.id) : visibleItems().map((r) => r.id);
+}
+
+/**
+ * 勾选一项。
+ *   普通点击      —— 切换这一项，并把它记成锚点
+ *   Shift + 点击 —— 从锚点到这一项之间的**整段连续区间**并入选择（只加不减），锚点不变
+ *   锚点已不在当前视图（换了筛选 / 排序）时，Shift 退化为普通切换
+ * @param order 当前可见顺序
+ * @param kind  'res' 资源 / 'text' 文案
+ * @returns {mode:'toggle'|'range', ids:Array, added:number}
+ */
+export function pickSelection(order, id, shift, kind) {
+  const isText = kind === 'text';
+  const set = isText ? state.selText : state.sel;
+  const anchorId = isText ? state.anchorText : state.anchor;
+  const from = anchorId ? order.indexOf(anchorId) : -1;
+  const to = order.indexOf(id);
+  if (shift && from >= 0 && to >= 0 && from !== to) {
+    const lo = Math.min(from, to);
+    const hi = Math.max(from, to);
+    const ids = order.slice(lo, hi + 1);
+    let added = 0;
+    for (const x of ids) if (!set.has(x)) { set.add(x); added++; }
+    return { mode: 'range', ids: ids, added: added };
+  }
+  if (set.has(id)) set.delete(id);
+  else { set.add(id); }
+  if (isText) state.anchorText = id;
+  else state.anchor = id;
+  return { mode: 'toggle', ids: [id], added: set.has(id) ? 1 : 0 };
+}
+
+/** 只把区间并入（预览叠加层用：不切换锚点以外的项） */
+export function addRange(order, fromId, toId, kind) {
+  const set = kind === 'text' ? state.selText : state.sel;
+  const a = order.indexOf(fromId);
+  const b = order.indexOf(toId);
+  if (a < 0 || b < 0) return [];
+  const ids = order.slice(Math.min(a, b), Math.max(a, b) + 1);
+  for (const x of ids) set.add(x);
+  return ids;
 }
 
 export function selectedItems() {

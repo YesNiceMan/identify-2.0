@@ -1,6 +1,7 @@
 import { $, el, esc, fmtBytes, bytesText, fmtDuration, fmtNum, pixels, typeOf, TYPES, TYPE_ORDER, PROV_LABEL, hostUrl } from './util.js';
 import { proxySrc, downloadSrc } from './api.js';
 import { state, counts, visibleItems, visibleTexts, totals, selectionBytes, selectedItems } from './store.js';
+import { regionLabel } from './pv-match.js';
 
 let H = {};
 export function mount(handlers) { H = handlers; }
@@ -101,6 +102,7 @@ export function renderPolicy() {
     el('b', { text: pol.mode || '仅内容资源' }),
     el('s', { class: pol.includeIcons ? 'on' : '', text: pol.includeIcons ? 'UI 图标 开' : 'UI 图标 关' }),
     el('s', { class: pol.includeTech ? 'on' : '', text: pol.includeTech ? '技术资源 开' : '技术资源 关' }),
+    el('s', { class: pol.mainOnly ? '' : 'on', text: pol.mainOnly ? '仅主体内容区' : '整页扫描' }),
   ]));
   if (!list.length) {
     box.appendChild(el('div', { class: 'spec-empty', text: '本次没有排除任何引用' }));
@@ -120,7 +122,17 @@ export function renderPolicy() {
     if (cur) { cur.count = g.count; cur.bytes = g.bytes || cur.bytes; cur.asked = g.probed || 0; cur.label = g.label || cur.label; cur.hint = g.hint || cur.hint; }
     else byReason.set(g.reason, { reason: g.reason, label: g.label, hint: g.hint, count: g.count, bytes: g.bytes || 0, asked: g.probed || 0 });
   }
+  const regionKinds = new Map();
+  for (const f of list) {
+    if (f.reason !== 'region') continue;
+    const k = f.kind || 'other';
+    regionKinds.set(k, (regionKinds.get(k) || 0) + 1);
+  }
+  const regionText = [...regionKinds.entries()]
+    .sort((a, b) => b[1] - a[1]).map(([k, n]) => regionLabel(k) + ' ' + n).join(' · ')
+    + '；只凭容器命名判定的区域里，下载链接与媒体标签仍会保留';
   const groups = [...byReason.values()].sort((a, b) => b.count - a.count);
+  for (const g of groups) if (g.reason === 'region' && regionText) g.hint = regionText;
   const max = Math.max(1, ...groups.map((g) => g.count));
   const wrap = el('div', { class: 'pol-list' });
   for (const g of groups) {
@@ -161,7 +173,7 @@ export function policyModalHtml(reason) {
     ['判定说明', first.hint || '按扫描策略排除'],
     ['条目数', list.length + ' 项'],
     ['体积合计', list.some((f) => f.size) ? bytesText(list.reduce((n, f) => n + (f.size || 0), 0)) : '尚未请求，无体积'],
-    ['开关', reason === 'icon' || reason === 'pixel' ? '「扫描 UI 图标」' : reason === 'overflow' ? '「最大资源数」' : '「扫描技术资源」'],
+    ['开关', reason === 'icon' || reason === 'pixel' ? '「扫描 UI 图标」' : reason === 'region' ? '「扫描页眉 / 导航 / 页脚」' : reason === 'overflow' ? '「最大资源数」' : '「扫描技术资源」'],
   ];
   return '<div class="view pol-view"><div class="pol-scroll"><table class="pol-table"><thead><tr>'
     + '<th>名称</th><th>类别</th><th>判定依据</th><th class="num">体积</th><th>来源</th></tr></thead>'
@@ -220,6 +232,8 @@ export function renderTabs() {
 export function renderStage() {
   const host = $('#stage-body');
   if (!host) return null;
+  /* 预览模式下卡片不可见，切回展台时 applyStage() 会重绘 —— 省掉一次全量重建 */
+  if (state.stage === 'preview') return host;
   if (state.filter.type === 'text') return renderTextStage(host);
   const list = visibleItems();
   host.className = '';
@@ -276,17 +290,19 @@ function matchesFilter(item) {
 export function cardNode(item) {
   const info = typeOf(item.type);
   const card = el('article', {
-    class: 'card' + (state.sel.has(item.id) ? ' sel' : '') + (item.status !== 'ok' ? ' bad' : ''),
-    dataset: { id: item.id, type: item.type },
+    class: 'card' + (state.sel.has(item.id) ? ' sel' : '') + (item.status !== 'ok' ? ' bad' : '')
+      + (item.zone === 'noise' ? ' zone-noise' + (item.zoneSoft ? ' soft' : '') : ''),
+    dataset: { id: item.id, type: item.type, zone: item.zone || '', zonekind: item.zoneKind || '' },
   });
   const thumb = el('div', { class: 'thumb' });
   thumb.appendChild(thumbContent(item, info));
   thumb.appendChild(el('span', { class: 'badge', text: info.label, style: 'color:' + info.color }));
   thumb.appendChild(el('button', {
-    class: 'tick', type: 'button', title: '选择 / 取消（空格）',
+    class: 'tick', type: 'button', title: '勾选 / 取消 · 按住 Shift 点击可从上次位置连续多选',
     html: '&#10003;',
-    onclick: (e) => { e.stopPropagation(); H.onSelect(item, card); },
+    onclick: (e) => { e.stopPropagation(); H.onSelect(item, card, e); },
   }));
+  thumb.appendChild(el('span', { class: 'shift-hint', html: '⇧ 连选', title: '按住 Shift 点击卡片：从上次勾选处连续多选（区间并入，不取消已有选择）' }));
   if (item.status !== 'ok') {
     thumb.appendChild(el('div', {
       class: 'status',
@@ -298,6 +314,16 @@ export function cardNode(item) {
   if (item.sprite) thumb.appendChild(el('span', { class: 'flag sprite', text: '精灵图 ' + (item.symbols || '?') + ' 图' }));
   else if (item.animated) thumb.appendChild(el('span', { class: 'flag anim', text: item.frames ? '动画 ' + item.frames + ' 帧' : '动画' }));
   if (item.familySize > 1) thumb.appendChild(el('span', { class: 'flag fam' + (item.familyBest ? ' best' : ''), text: item.familyBest ? '同族原件 ×' + item.familySize : '同族缩略候选' }));
+  if (item.zone === 'noise') thumb.appendChild(el('span', {
+    class: 'flag zoneout' + (item.zoneSoft ? ' soft' : ''),
+    text: regionLabel(item.zoneKind) + ' · 内容区外',
+    title: '这一项位于' + regionLabel(item.zoneKind) + (item.zoneSoft ? '（按容器命名推断）' : '（语义地标）')
+      + '，不属于主体内容区；打开「扫描页眉 / 导航 / 页脚」才会一并识别',
+  }));
+  else if (item.zoneAlso) thumb.appendChild(el('span', {
+    class: 'flag zoneout', text: '也被' + regionLabel(item.zoneAlso) + '引用',
+    title: '正文区里有它，' + regionLabel(item.zoneAlso) + '里也引用了同一地址',
+  }));
   if (item.rescued) thumb.appendChild(el('span', { class: 'flag rescue', title: esc(item.rescued), text: '按内容补探测' }));
   else if (item.iconFont) thumb.appendChild(el('span', { class: 'flag sprite', text: '图标字体' }));
   else if (item.encrypted) thumb.appendChild(el('span', { class: 'flag fam', text: '已加密' }));
@@ -327,6 +353,8 @@ export function cardNode(item) {
   card.appendChild(el('div', { class: 'body', html: '<div class=\"name\" title=\"' + esc(item.name || item.url) + '\">' + esc(item.name || '(内联资源)') + '</div><div class=\"meta\">' + metaBits.join('<i>/</i>') + '</div>' }));
   card.addEventListener('click', (e) => {
     if (e.target.closest('button, a')) return;
+    /* Shift + 点击卡片：不弹详情，直接从上次勾选处连续多选 */
+    if (e.shiftKey) { e.preventDefault(); H.onSelect(item, card, e); return; }
     H.onOpen(item);
   });
   if (H.onTilt) H.onTilt(card);
@@ -508,12 +536,13 @@ export function textRow(block) {
   const side = el('div', { class: 'side' });
   side.appendChild(el('span', { text: fmtNum(block.chars) + ' 字' }));
   if (block.line) side.appendChild(el('span', { text: 'L' + block.line }));
-  if (block.zone === 'noise') side.appendChild(el('span', { text: '噪音区', style: 'color:#ffd166' }));
+  if (block.zone === 'noise') side.appendChild(el('span', { class: 'zchip', text: regionLabel(block.zoneKind), title: '位于' + regionLabel(block.zoneKind) + '，在主体内容区之外' }));
+  else if (block.zone === 'main') side.appendChild(el('span', { class: 'zchip main', text: '正文区', title: '这段在主体内容区里' }));
   side.appendChild(el('span', { class: 'icon-btn', style: 'width:22px;height:22px', html: '&#8646;', title: '复制这段', onclick: (e) => { e.stopPropagation(); H.onCopyText(block); } }));
   row.appendChild(side);
   row.addEventListener('click', (e) => {
     if (e.target.closest('.icon-btn')) return;
-    H.onSelectText(block, row);
+    H.onSelectText(block, row, e);
   });
   return row;
 }
@@ -534,6 +563,10 @@ export function detailHtml(item) {
   const yes = (txt) => txt || '是';
   rows.push(['类型', info.label + ' / ' + info.en]);
   rows.push(['状态', item.status === 'ok' ? '可导出' : statusLabel(item.status)]);
+  rows.push(['扫描区域', item.zone === 'noise'
+    ? '内容区之外 · ' + regionLabel(item.zoneKind) + (item.zoneSoft ? '（按容器命名推断）' : '（语义地标）') + '，关掉「扫描页眉 / 导航 / 页脚」才会一并识别'
+    : (item.zone === 'main' ? '主体内容区' : '未定性（页面级来源或结构未标注）')
+    + (item.zoneAlso ? ' · 同时被' + regionLabel(item.zoneAlso) + '引用' : '')]);
   rows.push(['原始体积', item.size ? bytesText(item.size) + ' (' + fmtNum(item.size) + ' 字节)' : '未知']);
   if (item.width && item.height) rows.push(['像素尺寸', item.width + ' × ' + item.height + ' · ' + ((item.width * item.height) / 1e6).toFixed(2) + ' MP' + (item.vector ? '（矢量按 viewBox 换算）' : '')]);
   if (item.duration) rows.push(['时长', fmtDuration(item.duration)]);
@@ -650,6 +683,7 @@ export function detailHtml(item) {
       ? '<a class="dbtn" href="' + esc(src) + (item.inline ? '&download=1' : '&download=1') + '">下载原文件</a><button class="dbtn" data-copy>复制地址</button>' + (item.url ? '<button class="dbtn" data-open>新窗口打开</button>' : '')
       : '<button class="dbtn" data-retry>重新探测</button>')
     + '<button class="dbtn ' + (state.sel.has(item.id) ? 'ghost' : '') + '" data-toggle>' + (state.sel.has(item.id) ? '取消选择' : '加入导出') + '</button>'
+    + '<button class="dbtn" data-locate="' + esc(item.id) + '" title="切到页面预览并高亮它在原始页面里的位置">在预览中定位</button>'
     + '</div>'
     + '<div class="hint-line">导出使用该地址的完整响应字节，图片不会被重压缩，音视频不会被转码。</div>'
     + '</div>';
@@ -666,7 +700,8 @@ export function textDetailHtml(block) {
     + (block.line ? '<dt>行号</dt><dd>第 ' + block.line + ' 行</dd>' : '')
     + (block.cls ? '<dt>class</dt><dd>' + esc(block.cls) + '</dd>' : '')
     + '</dl>'
-    + '<div class="row-acts"><button class="dbtn" data-copytext>复制这段</button><button class="dbtn ' + (state.selText.has(block.id) ? 'ghost' : '') + '" data-toggletext>' + (state.selText.has(block.id) ? '取消选择' : '加入文案导出') + '</button></div>'
+    + '<div class="row-acts"><button class="dbtn" data-copytext>复制这段</button><button class="dbtn ' + (state.selText.has(block.id) ? 'ghost' : '') + '" data-toggletext>' + (state.selText.has(block.id) ? '取消选择' : '加入文案导出') + '</button>'
+    + '<button class="dbtn" data-locatetext="' + esc(block.id) + '" title="切到页面预览的文案层并高亮这一段">在预览中定位</button></div>'
     + '</div>';
 }
 
