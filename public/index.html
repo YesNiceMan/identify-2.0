@@ -49,6 +49,10 @@
           <input id="url" type="text" spellcheck="false" placeholder="https://example.com 或 http://127.0.0.1:4620/samples/lab" aria-label="要解析的网站链接">
           <button type="button" class="clear" id="clear-url" title="清空">×</button>
         </div>
+        <button type="button" class="open-page-btn" id="open-page" title="打开目标网页，在页面中实时框选或勾选元素导出">
+          <span class="label">打开页面</span>
+          <span class="hint">PREVIEW</span>
+        </button>
         <button type="submit" class="ignite" id="ignite">
           <span class="label">开始扫描</span>
           <span class="hint">ENTER</span>
@@ -148,8 +152,8 @@
 
   <footer class="foot">
     <span>IDENTIFY 2.0 · 本地解析服务 · 不上传任何数据到第三方</span>
-    <span>快捷键 <span class="kbd">/</span> 定位 <span class="kbd">↵</span> 扫描 <span class="kbd">A</span> 全选 <span class="kbd">E</span> 导出 <span class="kbd">P</span> 页面预览 <span class="kbd">Esc</span> 关闭</span>
-    <span>多选 <span class="kbd">⇧</span>+点击 连续多选 <span class="kbd">⇧</span>+拖框 叠加区域</span>
+    <span>快捷键 <span class="kbd">/</span> 定位 <span class="kbd">↵</span> 扫描 <span class="kbd">P</span> 页面预览 <span class="kbd">V</span> 勾选模式 <span class="kbd">M</span> 框选模式 <span class="kbd">A</span> 全选 <span class="kbd">E</span> 导出 <span class="kbd">Esc</span> 关闭</span>
+    <span>多选 <span class="kbd">⇧</span>+点击 连续勾选 <span class="kbd">⇧</span>+拖框 叠加框选 <span class="kbd">⌥</span>+拖框 减去框选</span>
   </footer>
 </div>
 

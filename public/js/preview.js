@@ -1,15 +1,15 @@
 /**
- * 页面预览 —— 扫描后把原始页面按版式呈现出来，并允许「在预览里选择，再导出」。
+ * 页面预览 —— 扫描后把原始页面按版式呈现出来，并允许「在页面中框选或勾选元素导出」。
  *
  * 链路：
  *   /api/preview 返回去掉脚本的静态快照 → 同源 iframe（sandbox 不给 allow-scripts）
- *   → 外层把扫描结果按地址逐一对回 DOM 元素 → 影子层里画出可点选的资源框
- *   → 点选 / 区域框选 / 按类型与筛选联动 / 文案块模式 → 选完直接进导出坞。
+ *   → 外层把扫描结果按地址逐一对回 DOM 元素 → 影子层里画出可点选/可勾选的资源框
+ *   → 勾选 / 区域框选 / 按类型与筛选联动 / 文案块模式 → 选完直接在页面上一键导出。
  *
  * 与页面 CSS 隔离：叠加层用 shadow root，站点样式进不来，我们的样式也不影响站点。
  */
 import { el, esc, bytesText, fmtNum, typeOf, TYPES, clamp } from './util.js';
-import { state, visibleItems, visibleTexts, pickSelection } from './store.js';
+import { state, visibleItems, visibleTexts, pickSelection, putResource, putTexts } from './store.js';
 import {
   absKey, elementKeys, computedCssUrls, blockKey, normText, INLINE_TAGS, box, overlap,
   regionStep, regionOf, regionLabel, REGION_ROOT,
@@ -30,10 +30,10 @@ const BLOCK_TAGS = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li', 'dt', 'dd', '
 
 const S = {
   gen: 0, frame: null, canvas: null, viewport: null, host: null, doc: null, win: null,
-  layer: null, root: null, wrap: null, cap: null, mq: null, boxHost: null, foot: null, stat: null, loading: null,
+  layer: null, root: null, wrap: null, cap: null, mq: null, mqBadge: null, boxHost: null, foot: null, stat: null, loading: null,
   boxes: [], base: '', pageUrl: '', pageMeta: null,
   zoom: 'fit', width: 1440, k: 1, docW: 1440, docH: 800, truncated: false,
-  mode: 'res', region: false, excluded: false, force: false, marks: true, regions: [],
+  mode: 'res', tool: 'pick', region: false, excluded: false, force: false, marks: true, regions: [],
   ready: false, regionIds: [], regionTexts: [],
   mappedCount: 0, unmapped: [], timers: [], io: null,
 };
@@ -54,6 +54,13 @@ export function setPreviewMode(mode) {
   if (host) Array.prototype.forEach.call(host.children, (x, i) => x.classList.toggle('on', (i === 0) === (mode === 'res')));
 }
 
+export function setPreviewTool(tool) {
+  if (tool !== 'pick' && tool !== 'marquee') return;
+  S.tool = tool;
+  const host = document.getElementById('pv-tool');
+  if (host) Array.prototype.forEach.call(host.children, (x, i) => x.classList.toggle('on', (i === 0) === (tool === 'pick')));
+}
+
 export function renderPreviewStage(host) {
   const gen = ++S.gen;
   S.job = state.job;
@@ -70,10 +77,40 @@ export function renderPreviewStage(host) {
   S.pageMeta = pages.find((pg) => pg.url === S.pageUrl) || pages[0];
 
   const bar = el('div', { class: 'pv-bar' });
+  const urlBox = el('div', { class: 'pv-url-box' });
+  urlBox.appendChild(el('span', { class: 'pv-url-tag', text: 'URL' }));
+  const urlInp = el('input', {
+    class: 'pv-url-input',
+    type: 'text',
+    value: S.pageUrl || state.url || '',
+    placeholder: '输入网址并按回车直接打开…',
+    spellcheck: 'false',
+  });
+  const urlGo = el('button', { class: 'pv-url-btn', type: 'button', text: '打开 ↵' });
+  const triggerGo = () => {
+    const nextUrl = urlInp.value.trim();
+    if (!nextUrl) return;
+    if (H.onNavigate) H.onNavigate(nextUrl);
+    else {
+      S.pageUrl = nextUrl;
+      loadFrame(S.gen);
+    }
+  };
+  urlInp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); triggerGo(); } });
+  urlGo.addEventListener('click', triggerGo);
+  urlBox.appendChild(urlInp);
+  urlBox.appendChild(urlGo);
+  bar.appendChild(urlBox);
+  bar.appendChild(spacer());
+
   bar.appendChild(segControl('pv-mode', [['res', '资源标记'], ['text', '文案块']], S.mode,
     (v) => { S.mode = v; setRegionMode(); remap(gen); }));
   bar.appendChild(spacer());
-  bar.appendChild(toggleButton('区域框选', () => { S.region = !S.region; setRegionMode(); }, () => S.region));
+  bar.appendChild(segControl('pv-tool', [['pick', '↖ 勾选模式 (V)'], ['marquee', '⬚ 框选模式 (M)']], S.tool,
+    (v) => { S.tool = v; setPreviewTool(v); }));
+  bar.appendChild(spacer());
+  bar.appendChild(toggleButton('全选本页', () => selectAllOnPage(), () => false));
+  bar.appendChild(toggleButton('反选', () => invertSelectionOnPage(), () => false));
   bar.appendChild(toggleButton('含已排除', () => { S.excluded = !S.excluded; remap(gen); }, () => S.excluded));
   bar.appendChild(toggleButton('强制显形', () => { S.force = !S.force; applyForce(); }, () => S.force));
   bar.appendChild(toggleButton('标注非扫描区', () => { S.marks = !S.marks; paintRegions(); layoutRegions(); }, () => S.marks,
@@ -95,9 +132,9 @@ export function renderPreviewStage(host) {
 
   const hint = el('div', { class: 'pv-hint' }, [
     el('b', { class: 'dot' }),
-    el('span', { html: '静态快照 · 不执行页面脚本，版式 / 配色 / 字体全部沿用站点自己的 CSS。' }),
+    el('span', { html: '页面实时交互 · 在页面中直接<b>框选</b>或<b>勾选</b>元素进行导出。' }),
     el('span', { class: 'sep', text: '｜' }),
-    el('span', { html: '<b>点框</b> 选择 · <b>⇧ + 点框</b> 连续多选 · <b>区域框选</b> 圈一块全选（按住 ⇧ 叠加）· <b>⌥ + 点</b> 打开详情 · <b>滚轮 + ⌘</b> 缩放' }),
+    el('span', { html: '<b>点选/勾选</b> 切换元素 · <b>⇧ + 点击</b> 连续多选 · <b>按住鼠标拖动</b> 区域框选（按住 ⇧ 叠加 / ⌥ 减选）· <b>⌥ + 点击</b> 查看详情 · <b>V/M</b> 切换工具' }),
   ]);
 
   S.viewport = el('div', { class: 'pv-viewport' });
@@ -202,6 +239,7 @@ function attach(gen) {
   relayout(gen, false, () => {
     settleImages(gen, () => {
       hideLoading();
+      autoHarvestFromDom();
       remap(gen);
       S.ready = true;
       if (S.stat) S.stat.textContent = '预览就绪 · 文档 ' + S.docW + '×' + S.docH + (S.truncated ? '（高度已截断）' : '');
@@ -237,18 +275,21 @@ function buildLayer(doc) {
     root.appendChild(n);
     return n;
   };
-  S.cap = mk('idv-cap', true);
+  S.cap = mk('idv-cap', false);
   S.regionHost = mk('idv-rs');
   S.boxHost = mk('idv-boxes');
   S.mq = mk('idv-mq', true);
+  S.mqBadge = doc.createElement('div');
+  S.mqBadge.className = 'idv-mq-badge';
+  S.mq.appendChild(S.mqBadge);
   wireOverlay(doc);
 }
 
 const OVERLAY_CSS = [
   ':host{position:absolute;left:0;top:0;width:0;height:0;z-index:2147483647;pointer-events:none;display:block}',
-  '.idv-cap{position:absolute;left:0;top:0;background:rgba(74,217,255,.02);cursor:crosshair;pointer-events:auto}',
-  '.idv-boxes{position:absolute;left:0;top:0;width:0;height:0}',
-  '.idv-rs{position:absolute;left:0;top:0;width:0;height:0}',
+  '.idv-cap{position:absolute;left:0;top:0;background:rgba(74,217,255,.01);cursor:crosshair;pointer-events:auto}',
+  '.idv-boxes{position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;z-index:20}',
+  '.idv-rs{position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;z-index:5}',
   '.idv-r{position:absolute;box-sizing:border-box;border:1px dashed rgba(255,209,102,.5);border-radius:3px;'
     + 'background:repeating-linear-gradient(135deg,rgba(255,209,102,.07) 0 7px,rgba(255,209,102,.02) 7px 14px);'
     + 'pointer-events:none}',
@@ -259,30 +300,40 @@ const OVERLAY_CSS = [
     + 'letter-spacing:.06em;white-space:nowrap;padding:1px 6px;border:1px solid rgba(255,209,102,.55);border-bottom:0;'
     + 'border-radius:2px 2px 0 0;background:rgba(5,7,10,.92);color:#ffd166}',
   '.idv-r.tiny>i{display:none}',
-  '.idv-mq{position:absolute;border:1px solid #b8ff3c;background:rgba(184,255,60,.16);box-shadow:0 0 0 9999px rgba(3,5,8,.3);pointer-events:none}',
-  '.idv-b{position:absolute;box-sizing:border-box;border:1.5px solid var(--c);background:var(--f);border-radius:2px;'
+  '.idv-mq{position:absolute;border:1.5px dashed #b8ff3c;background:rgba(184,255,60,.14);box-shadow:0 0 0 9999px rgba(3,5,8,.32),0 0 16px rgba(184,255,60,.35);pointer-events:none;border-radius:2px;z-index:100}',
+  '.idv-mq-badge{position:absolute;left:4px;top:-26px;background:#05070a;color:#b8ff3c;border:1px solid #b8ff3c;border-radius:3px;font-size:11px;padding:2px 7px;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;box-shadow:0 4px 12px rgba(0,0,0,.7);font-weight:700;pointer-events:none}',
+  '.idv-b{position:absolute;box-sizing:border-box;border:1.5px solid var(--c);background:var(--f);border-radius:3px;'
     + 'pointer-events:auto;cursor:pointer;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;'
-    + 'transition:box-shadow .16s ease,background .16s ease}',
-  '.idv-b:hover{background:var(--g)}',
+    + 'transition:box-shadow .16s ease,background .16s ease,border-color .16s ease}',
+  '.idv-b:hover{background:var(--g);box-shadow:0 0 0 1px var(--c),0 0 12px var(--c)}',
   '.idv-b .n{position:absolute;left:-1px;top:-1px;transform:translateY(-100%);background:#05070a;color:#fff;'
     + 'border:1px solid var(--c);border-bottom:0;font-size:10px;line-height:1.1;padding:2px 5px;white-space:nowrap;'
-    + 'max-width:260px;overflow:hidden;text-overflow:ellipsis}',
+    + 'max-width:260px;overflow:hidden;text-overflow:ellipsis;border-radius:2px 2px 0 0}',
   '.idv-b .d{position:absolute;right:-1px;bottom:-1px;background:var(--c);color:#04070a;font-size:9px;line-height:1;'
-    + 'padding:2px 4px;white-space:nowrap;opacity:0;transition:opacity .16s ease;font-weight:700}',
+    + 'padding:2px 4px;white-space:nowrap;opacity:0;transition:opacity .16s ease;font-weight:700;border-radius:2px 0 2px 0}',
   '.idv-b:hover .d,.idv-b.sel .d{opacity:1}',
-  '.idv-b.sel{border-width:2px;box-shadow:0 0 0 2px rgba(184,255,60,.5),0 0 22px rgba(184,255,60,.3)}',
+  '.idv-b.sel{border-width:2px;border-color:#b8ff3c!important;box-shadow:0 0 0 2px rgba(184,255,60,.6),0 0 24px rgba(184,255,60,.4);z-index:30}',
+  '.idv-b.sel .n{border-color:#b8ff3c;color:#b8ff3c}',
   '.idv-b.bad{border-style:dotted;opacity:.9}',
   '.idv-b.exc{border-style:dashed;opacity:.55}',
   '.idv-b.tiny{min-width:16px;min-height:16px}',
   '.idv-b.csspos{border-style:dashed}',
   '.idv-b.pulse{animation:idvPulse 1.2s ease 2}',
+  '.idv-b.mq-hit{border-color:#4ad9ff!important;box-shadow:0 0 0 2px rgba(74,217,255,.7),0 0 18px rgba(74,217,255,.5)}',
+  '.idv-chk{position:absolute;top:2px;right:2px;width:16px;height:16px;border-radius:3px;border:1px solid rgba(255,255,255,.55);'
+    + 'background:rgba(5,7,10,.88);display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;line-height:1;'
+    + 'transition:all .16s ease;opacity:.8;pointer-events:auto;user-select:none}',
+  '.idv-b:hover .idv-chk,.idv-t:hover .idv-chk{opacity:1;border-color:#4ad9ff;background:rgba(74,217,255,.2)}',
+  '.idv-b.sel .idv-chk,.idv-t.sel .idv-chk{opacity:1;border-color:#b8ff3c;background:#b8ff3c;color:#05070a;font-weight:900;box-shadow:0 0 10px rgba(184,255,60,.9)}',
   '.idv-t{position:absolute;box-sizing:border-box;border:1.5px dashed rgba(184,255,60,.65);background:rgba(184,255,60,.06);'
-    + 'pointer-events:auto;cursor:pointer;border-radius:2px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}',
+    + 'pointer-events:auto;cursor:pointer;border-radius:3px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;'
+    + 'transition:box-shadow .16s ease,background .16s ease,border-color .16s ease}',
   '.idv-t .n{position:absolute;left:-1px;top:-1px;transform:translateY(-100%);background:#0b1220;color:#dcf7b0;'
     + 'border:1px solid rgba(184,255,60,.5);font-size:10px;line-height:1.1;padding:2px 5px;white-space:nowrap;'
-    + 'max-width:260px;overflow:hidden;text-overflow:ellipsis}',
-  '.idv-t:hover{background:rgba(184,255,60,.16)}',
-  '.idv-t.sel{border-style:solid;border-color:#b8ff3c;box-shadow:0 0 0 2px rgba(184,255,60,.4)}',
+    + 'max-width:260px;overflow:hidden;text-overflow:ellipsis;border-radius:2px 2px 0 0}',
+  '.idv-t:hover{background:rgba(184,255,60,.16);box-shadow:0 0 0 1px rgba(184,255,60,.4)}',
+  '.idv-t.sel{border-style:solid;border-color:#b8ff3c;box-shadow:0 0 0 2px rgba(184,255,60,.5),0 0 22px rgba(184,255,60,.3);z-index:30}',
+  '.idv-t.mq-hit{border-color:#4ad9ff!important;box-shadow:0 0 0 2px rgba(74,217,255,.7),0 0 18px rgba(74,217,255,.5)}',
   '@keyframes idvPulse{0%,100%{box-shadow:0 0 0 0 rgba(74,217,255,0)}45%{box-shadow:0 0 0 7px rgba(74,217,255,.4)}}',
   '@media (prefers-reduced-motion:reduce){.idv-b.pulse{animation:none}}',
 ].join('');
@@ -456,6 +507,86 @@ function loadFrame(gen) {
   if (S.boxHost) S.boxHost.textContent = '';
   if (S.loading) S.loading.style.display = '';
   S.frame.src = previewUrl();
+}
+
+/* ============================================================== 自动从 DOM 提取元素 */
+
+function autoHarvestFromDom() {
+  if (!S.doc) return;
+  if (!state.resources.length) {
+    const found = [];
+    const seenUrls = new Set();
+    let idx = 1;
+    const all = S.doc.querySelectorAll('img, svg, video, audio, source, a[href], [style*="url("]');
+    for (const e of all) {
+      const tag = String(e.tagName || '').toLowerCase();
+      let rawUrl = '';
+      let type = 'image';
+      if (tag === 'img') {
+        rawUrl = e.currentSrc || e.src || e.getAttribute('src') || e.getAttribute('data-src') || '';
+        type = /\.svg(\?|#|$)/i.test(rawUrl) ? 'vector' : 'image';
+      } else if (tag === 'svg') {
+        type = 'vector';
+      } else if (tag === 'video' || tag === 'audio') {
+        rawUrl = e.currentSrc || e.src || e.getAttribute('src') || '';
+        type = tag;
+      } else if (tag === 'source') {
+        rawUrl = e.src || e.getAttribute('src') || '';
+        const parentTag = e.parentElement ? String(e.parentElement.tagName || '').toLowerCase() : '';
+        type = parentTag === 'audio' ? 'audio' : 'video';
+      } else if (tag === 'a') {
+        rawUrl = e.getAttribute('href') || '';
+        if (/\.(png|jpe?g|webp|gif|svg|mp4|webm|mp3|wav|ogg|pdf|zip|rar|tar|gz|7z)(\?|#|$)/i.test(rawUrl)) {
+          if (/\.(mp4|webm)(\?|#|$)/i.test(rawUrl)) type = 'video';
+          else if (/\.(mp3|wav|ogg)(\?|#|$)/i.test(rawUrl)) type = 'audio';
+          else if (/\.(pdf|docx?|xlsx?|pptx?)(\?|#|$)/i.test(rawUrl)) type = 'doc';
+          else if (/\.(zip|rar|7z|tar|gz)(\?|#|$)/i.test(rawUrl)) type = 'archive';
+          else if (/\.svg(\?|#|$)/i.test(rawUrl)) type = 'vector';
+          else type = 'image';
+        } else {
+          rawUrl = '';
+        }
+      }
+      const abs = rawUrl ? absKey(rawUrl, S.base) : '';
+      if (abs && !seenUrls.has(abs)) {
+        seenUrls.add(abs);
+        const name = (abs.split('/').pop() || 'resource').split('?')[0];
+        found.push({
+          id: 'dom-' + (idx++),
+          url: abs,
+          name: decodeURIComponent(name),
+          type,
+          status: 'ok',
+          size: 0,
+          provenance: 'dom',
+        });
+      }
+    }
+    if (found.length) {
+      for (const it of found) putResource(it);
+    }
+  }
+
+  if (!state.texts.length) {
+    const textBlocks = [];
+    let tidx = 1;
+    const blockNodes = S.doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, blockquote, li, td, th');
+    for (const el of blockNodes) {
+      const tag = String(el.tagName || '').toLowerCase();
+      const txt = directText(el);
+      if (txt && txt.length >= 2) {
+        textBlocks.push({
+          id: 't-' + (tidx++),
+          tag,
+          text: txt,
+          chars: txt.length,
+        });
+      }
+    }
+    if (textBlocks.length) {
+      putTexts(textBlocks);
+    }
+  }
 }
 
 /* ============================================================== 对表 */
@@ -649,6 +780,7 @@ function collectTextHits() {
 
 function remap(gen) {
   if (gen !== S.gen || !S.doc || !S.layer) return;
+  autoHarvestFromDom();
   const out = S.mode === 'text' ? collectTextHits() : collectResourceHits();
   S.boxes = out.hits.map((h) => ({
     id: h.id, el: h.el, exc: !!h.exc, text: !!h.text, entry: h.entry, viaSel: !!h.sel,
@@ -682,6 +814,11 @@ function buildBoxNodes(isText) {
       node.style.setProperty('--f', shade(info.color, 0.12));
       node.style.setProperty('--g', shade(info.color, 0.3));
     }
+    const chk = S.doc.createElement('span');
+    chk.className = 'idv-chk';
+    chk.title = '勾选 / 取消勾选';
+    node.appendChild(chk);
+
     const label = isText
       ? (b.entry.tag + (b.entry.level ? b.entry.level : '') + ' · ' + normText(b.entry.text).slice(0, 46))
       : String(b.entry.name || b.entry.url || '内联资源').slice(0, 46);
@@ -692,14 +829,14 @@ function buildBoxNodes(isText) {
     if (!isText) {
       const size = S.doc.createElement('span');
       size.className = 'd';
-      size.textContent = b.entry.status === 'ok'
-        ? bytesText(b.entry.size || 0) + (b.entry.width && b.entry.height ? ' · ' + b.entry.width + '×' + b.entry.height : '')
-        : '不可达';
+      size.textContent = (b.entry.size && b.entry.size > 0)
+        ? (bytesText(b.entry.size) + (b.entry.width && b.entry.height ? ' · ' + b.entry.width + '×' + b.entry.height : ''))
+        : (b.entry.width && b.entry.height ? b.entry.width + '×' + b.entry.height : '就绪');
       node.appendChild(size);
     }
     node.title = isText
       ? normText(b.entry.text).slice(0, 260)
-      : [b.entry.name || '', b.entry.type || '', bytesText(b.entry.size || 0),
+      : [b.entry.name || '', b.entry.type || '', b.entry.size ? bytesText(b.entry.size) : '',
         b.entry.width && b.entry.height ? b.entry.width + '×' + b.entry.height : '', b.entry.url || '',
         b.viaSel ? '按样式选择器 ' + (b.entry.selector || '') + ' 定位（该样式由脚本注入，快照里未渲染）' : ''].filter(Boolean).join(' · ');
     b.node = node;
@@ -731,11 +868,6 @@ function layoutBoxes() {
 
 /* ============================================================== 非扫描区标注 */
 
-/**
- * 沿快照 DOM 走一遍，找出「最外层的非内容区容器」（页眉 / 导航菜单 / 页脚 / 侧栏 / 表单 / 挂件）
- * 与「最外层的正文容器」。判定逻辑与扫描服务端的 server/region.mjs 逐字镜像（见 pv-match.js），
- * 所以这里框出来的就是扫描时真正没看的地方。
- */
 function collectRegions() {
   S.regions = [];
   if (!S.doc || !S.regionHost) return;
@@ -760,7 +892,6 @@ function collectRegions() {
     if (here.zone === 'noise' && noise.length < 60) noise.push({ el: e, kind: here.kind, zone: 'noise', soft: !!here.soft });
     else if (here.zone === 'main' && main.length < 12) main.push({ el: e, kind: '', zone: 'main' });
   }
-  /* 正文容器套在噪音容器里时（例如 footer 里的 main）不重复框 */
   const picked = noise.concat(main.filter((m) => !noise.some((n) => n.el.contains(m.el) && n.el !== m.el)));
   S.regions = picked;
   paintRegions();
@@ -793,7 +924,6 @@ function layoutRegions() {
     if (!r.node) continue;
     const rect = rectOf(r.el);
     if (!rect || rect.width < 2 || rect.height < 2) { r.node.style.display = 'none'; continue; }
-    /* 占满整页的框多半是把整页误判成了「页眉」，不画 */
     if (rect.width * rect.height > area * 0.92) { r.node.style.display = 'none'; continue; }
     r.node.style.display = '';
     r.node.style.left = Math.round(rect.left - hostRect.left) + 'px';
@@ -806,12 +936,10 @@ function layoutRegions() {
 
 function visibleIdSet() {
   if (S.mode === 'text') return new Set(visibleTexts().map((b) => b.id));
-  /* 「文字」标签页下 type==='text'：资源叠加层不做类型过滤，避免整页标记被隐藏 */
   if (state.filter.type === 'text') return new Set(state.resources.map((r) => r.id));
   return new Set(visibleItems().map((r) => r.id));
 }
 
-/** 「只看已选」是展台卡片的筛选，不能反过来让预览里的选择动作扑空 */
 function selectableIdSet() {
   const was = state.filter.onlySel;
   state.filter.onlySel = false;
@@ -826,7 +954,7 @@ function applyVisibility() {
     if (!b.node || b.hidden) continue;
     const show = vis.has(b.id) && !(b.exc && !S.excluded);
     b.node.style.opacity = show ? '' : '0';
-    b.node.style.pointerEvents = show ? '' : 'none';
+    b.node.style.pointerEvents = show ? 'auto' : 'none';
     b.dim = !show;
   }
 }
@@ -835,57 +963,103 @@ function syncSelection() {
   const sel = S.mode === 'text' ? state.selText : state.sel;
   for (const b of S.boxes) {
     if (!b.node) continue;
-    b.node.classList.toggle('sel', sel.has(b.id));
+    const isSelected = sel.has(b.id);
+    b.node.classList.toggle('sel', isSelected);
+    const chk = b.node.querySelector('.idv-chk');
+    if (chk) chk.textContent = isSelected ? '✓' : '';
   }
 }
 
 function wireOverlay(doc) {
-  const host = S.root;
   let drag = null;
-  S.boxHost.addEventListener('click', (ev) => {
-    if (S.region) return;
-    const node = ev.target && ev.target.closest ? ev.target.closest('[data-id]') : null;
-    if (!node) return;
-    ev.preventDefault();
-    ev.stopPropagation();
-    const id = node.dataset.id;
-    if (ev.altKey) { openEntry(id); return; }
-    toggleEntry(id, ev);
+
+  S.root.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0) return;
+    const targetNode = ev.target && ev.target.closest ? ev.target.closest('[data-id]') : null;
+    drag = {
+      startX: ev.pageX,
+      startY: ev.pageY,
+      shift: ev.shiftKey,
+      alt: ev.altKey,
+      moved: false,
+      targetId: targetNode ? targetNode.dataset.id : null,
+      pointerId: ev.pointerId,
+    };
+    try { S.cap.setPointerCapture(ev.pointerId); } catch {}
   });
-  S.cap.addEventListener('pointerdown', (ev) => {
-    drag = { x: ev.pageX, y: ev.pageY, add: ev.shiftKey };
-    S.mq.style.display = '';
-    try { S.cap.setPointerCapture(ev.pointerId); } catch { /* noop */ }
-    if (!drag.add) paintRegion([]);
-  });
-  S.cap.addEventListener('pointermove', (ev) => {
+
+  S.root.addEventListener('pointermove', (ev) => {
     if (!drag) return;
-    const r = box(Math.min(drag.x, ev.pageX), Math.min(drag.y, ev.pageY),
-      Math.abs(ev.pageX - drag.x), Math.abs(ev.pageY - drag.y));
-    S.mq.style.left = r.left + 'px';
-    S.mq.style.top = r.top + 'px';
-    S.mq.style.width = r.width + 'px';
-    S.mq.style.height = r.height + 'px';
-    if (r.width > 6 && r.height > 6) paintRegion(idsInRegion(r, drag.add));
+    const dx = Math.abs(ev.pageX - drag.startX);
+    const dy = Math.abs(ev.pageY - drag.startY);
+    if (dx > 4 || dy > 4) {
+      drag.moved = true;
+      S.mq.style.display = '';
+      const r = box(Math.min(drag.startX, ev.pageX), Math.min(drag.startY, ev.pageY), dx, dy);
+      S.mq.style.left = r.left + 'px';
+      S.mq.style.top = r.top + 'px';
+      S.mq.style.width = r.width + 'px';
+      S.mq.style.height = r.height + 'px';
+
+      const ids = idsInRegion(r, false);
+      const idSet = new Set(ids);
+      for (const b of S.boxes) {
+        if (b.node) b.node.classList.toggle('mq-hit', idSet.has(b.id));
+      }
+      if (S.mqBadge) {
+        const isText = S.mode === 'text';
+        const pool = isText ? state.texts : state.resources;
+        const matched = pool.filter((x) => idSet.has(x.id));
+        const totalBytes = isText ? 0 : matched.reduce((acc, x) => acc + (x.size || 0), 0);
+        S.mqBadge.textContent = isText
+          ? ('框选 ' + matched.length + ' 段文案')
+          : ('框选 ' + matched.length + ' 项' + (totalBytes > 0 ? ' · ' + bytesText(totalBytes) : ''));
+      }
+    }
   });
-  const end = (ev) => {
+
+  const onPointerEnd = (ev) => {
     if (!drag) return;
-    const start = drag;
+    const info = drag;
     drag = null;
     S.mq.style.display = 'none';
-    const r = box(Math.min(start.x, ev.pageX), Math.min(start.y, ev.pageY),
-      Math.abs(ev.pageX - start.x), Math.abs(ev.pageY - start.y));
-    if (r.width < 6 || r.height < 6) { paintRegion([]); return; }
-    commitRegion(idsInRegion(r, start.add));
+    for (const b of S.boxes) if (b.node) b.node.classList.remove('mq-hit');
+
+    if (!info.moved) {
+      // 单击 / 勾选事件
+      let id = info.targetId;
+      if (!id) {
+        const elAt = S.root.elementFromPoint ? S.root.elementFromPoint(ev.clientX, ev.clientY) : null;
+        const boxEl = elAt && elAt.closest ? elAt.closest('[data-id]') : null;
+        if (boxEl) id = boxEl.dataset.id;
+      }
+      if (id) {
+        if (ev.altKey) { openEntry(id); return; }
+        toggleEntry(id, ev);
+      }
+      return;
+    }
+
+    // 框选事件
+    const dx = Math.abs(ev.pageX - info.startX);
+    const dy = Math.abs(ev.pageY - info.startY);
+    const r = box(Math.min(info.startX, ev.pageX), Math.min(info.startY, ev.pageY), dx, dy);
+    if (r.width >= 4 && r.height >= 4) {
+      const ids = idsInRegion(r, false);
+      commitRegion(ids, info.shift, info.alt);
+    }
   };
-  S.cap.addEventListener('pointerup', end);
-  S.cap.addEventListener('pointercancel', () => { drag = null; S.mq.style.display = 'none'; });
+
+  S.root.addEventListener('pointerup', onPointerEnd);
+  S.root.addEventListener('pointercancel', () => {
+    drag = null;
+    S.mq.style.display = 'none';
+    for (const b of S.boxes) if (b.node) b.node.classList.remove('mq-hit');
+  });
 }
 
 function setRegionMode() {
   if (!S.cap) return;
-  S.cap.style.display = S.region ? '' : 'none';
-  S.boxHost.style.pointerEvents = S.region ? 'none' : '';
 }
 
 function idsInRegion(rect, additive) {
@@ -894,7 +1068,7 @@ function idsInRegion(rect, additive) {
   for (const b of S.boxes) {
     if (b.hidden || b.dim || b.exc) continue;
     if (!vis.has(b.id) || ids.indexOf(b.id) >= 0) continue;
-    if (overlap(b.rect, rect) >= 0.4) ids.push(b.id);
+    if (overlap(b.rect, rect) >= 0.35) ids.push(b.id);
   }
   if (additive) {
     const cur = new Set(S.mode === 'text' ? S.regionTexts : S.regionIds);
@@ -910,9 +1084,15 @@ function paintRegion(ids) {
   renderFoot();
 }
 
-function commitRegion(ids) {
+function commitRegion(ids, isAdditive, isSubtractive) {
   const set = S.mode === 'text' ? state.selText : state.sel;
-  for (const id of ids) set.add(id);
+  if (isSubtractive) {
+    for (const id of ids) set.delete(id);
+  } else if (isAdditive) {
+    for (const id of ids) set.add(id);
+  } else {
+    for (const id of ids) set.add(id);
+  }
   S.regionIds = S.mode === 'text' ? S.regionIds : ids.slice();
   S.regionTexts = S.mode === 'text' ? ids.slice() : S.regionTexts;
   syncSelection();
@@ -920,8 +1100,12 @@ function commitRegion(ids) {
   if (H.onSelectionChange) H.onSelectionChange();
   const n = ids.length;
   if (H.onToast) {
-    H.onToast(n ? (S.mode === 'text' ? '区域选中 <b>' + n + '</b> 段文案' : '区域选中 <b>' + n + '</b> 项资源 · 按 <b>E</b> 或点「导出这一区」')
-      : '这个区域里没有已识别的资源');
+    if (isSubtractive) {
+      H.onToast('已从选择中减去 <b>' + n + '</b> 项');
+    } else {
+      H.onToast(n ? (S.mode === 'text' ? '框选选中 <b>' + n + '</b> 段文案' : '框选选中 <b>' + n + '</b> 项资源 · 点「导出所选」一键下载')
+        : '这个选区内没有可识别的资源');
+    }
   }
 }
 
@@ -962,7 +1146,6 @@ function applyPick(r) {
   else S.regionIds = lo >= 0 && hi >= 0 ? ids.slice(Math.min(lo, hi), Math.max(lo, hi) + 1) : r.ids.slice();
   syncSelection();
   renderFoot();
-  /* 把这次点选结果交给外壳：Shift 连选时要显示「区间 N 项」而不是普通的「已选 N」 */
   if (H.onSelectionChange) H.onSelectionChange(r);
 }
 
@@ -982,9 +1165,9 @@ function renderFoot() {
   if (!S.foot) return;
   S.foot.innerHTML = '';
   const isText = S.mode === 'text';
-  const ids = isText ? S.regionTexts : S.regionIds;
+  const selSet = isText ? state.selText : state.sel;
   const pool = isText ? state.texts : state.resources;
-  const picked = pool.filter((x) => ids.indexOf(x.id) >= 0);
+  const picked = pool.filter((x) => selSet.has(x.id));
   const bytes = isText ? 0 : picked.reduce((n, r) => n + (r.status === 'ok' ? r.size || 0 : 0), 0);
   const chars = isText ? picked.reduce((n, b) => n + (b.chars || 0), 0) : 0;
 
@@ -1009,10 +1192,10 @@ function renderFoot() {
   const info = el('div', { class: 'pv-region' });
   if (picked.length) {
     info.appendChild(el('span', {
-      html: '<b>' + fmtNum(picked.length) + '</b> ' + (isText ? '段文案 · ' + fmtNum(chars) + ' 字' : '项 · ' + bytesText(bytes)),
+      html: '已选 <b>' + fmtNum(picked.length) + '</b> ' + (isText ? '段文案 · ' + fmtNum(chars) + ' 字' : '项' + (bytes > 0 ? ' · ' + bytesText(bytes) : '')),
     }));
   } else {
-    info.appendChild(el('span', { class: 'idle', text: isText ? '点选段落 · Shift 连选 · 或按住 Shift 拖动叠加区域' : '点选标记 · Shift 连选 · 或按住 Shift 拖动叠加区域' }));
+    info.appendChild(el('span', { class: 'idle', text: isText ? '页面中勾选 / 框选文案段落 · 按住 Shift 连续多选 / 叠加' : '页面中勾选 / 框选元素 · 按住 Shift 连续多选 / 叠加' }));
   }
   const rg = el('div', { class: 'pv-regions' });
   const byKind = new Map();
@@ -1041,18 +1224,22 @@ function renderFoot() {
 
   const acts = el('div', { class: 'pv-acts' });
   acts.appendChild(el('button', {
-    class: 'pv-btn', type: 'button', text: isText ? '选中本页全部文案' : '选中本页全部资源',
+    class: 'pv-btn go', type: 'button', disabled: !picked.length,
+    text: isText ? ('导出已选文案 (' + picked.length + '段) ↓') : ('导出所选 (' + picked.length + '项' + (bytes > 0 ? ' · ' + bytesText(bytes) : '') + ') ↓'),
+    title: isText ? '把勾选/框选到的文案导出为 md / json' : '把勾选/框选到的资源打成 ZIP，字节与站点返回完全一致',
+    onclick: () => exportRegion(),
+  }));
+  acts.appendChild(el('button', {
+    class: 'pv-btn', type: 'button', text: isText ? '全选本页文案' : '全选本页',
     onclick: () => selectAllOnPage(),
+  }));
+  acts.appendChild(el('button', {
+    class: 'pv-btn', type: 'button', text: '反选',
+    onclick: () => invertSelectionOnPage(),
   }));
   acts.appendChild(el('button', {
     class: 'pv-btn ghost', type: 'button', text: '清空选择',
     onclick: () => { if (isText) state.selText.clear(); else state.sel.clear(); state.anchorText = null; state.anchor = null; S.regionIds = []; S.regionTexts = []; syncSelection(); renderFoot(); if (H.onSelectionChange) H.onSelectionChange(); },
-  }));
-  acts.appendChild(el('button', {
-    class: 'pv-btn go', type: 'button', disabled: !picked.length,
-    text: isText ? '导出这一区文案 ↓' : '导出这一区原文件 ↓',
-    title: isText ? '把框选到的文案导出为 md' : '把框选到的资源打成 ZIP，字节与站点返回完全一致',
-    onclick: () => exportRegion(),
   }));
   if (picked.length && !isText) {
     acts.appendChild(el('button', {
@@ -1063,6 +1250,27 @@ function renderFoot() {
   S.foot.appendChild(acts);
 }
 
+function invertSelectionOnPage() {
+  const vis = selectableIdSet();
+  const isText = S.mode === 'text';
+  const set = isText ? state.selText : state.sel;
+  const pageIds = [];
+  for (const b of S.boxes) {
+    if (b.exc || b.hidden || !vis.has(b.id)) continue;
+    if (pageIds.indexOf(b.id) < 0) pageIds.push(b.id);
+  }
+  for (const id of pageIds) {
+    if (set.has(id)) set.delete(id);
+    else set.add(id);
+  }
+  if (isText) S.regionTexts = [...set].filter((id) => pageIds.includes(id));
+  else S.regionIds = [...set].filter((id) => pageIds.includes(id));
+  syncSelection();
+  renderFoot();
+  if (H.onSelectionChange) H.onSelectionChange();
+  if (H.onToast) H.onToast('已反选当前页元素 · 当前已选 <b>' + set.size + '</b> 项');
+}
+
 function selectAllOnPage() {
   const vis = selectableIdSet();
   const ids = [];
@@ -1070,7 +1278,6 @@ function selectAllOnPage() {
     if (b.exc || b.hidden || !vis.has(b.id)) continue;
     if (ids.indexOf(b.id) < 0) ids.push(b.id);
   }
-  /* 同一地址在页面上可能出现多处，按条目去重 */
   const set = S.mode === 'text' ? state.selText : state.sel;
   for (const id of ids) set.add(id);
   if (S.mode === 'text') S.regionTexts = ids.slice();
@@ -1083,15 +1290,16 @@ function selectAllOnPage() {
 
 function exportRegion() {
   const isText = S.mode === 'text';
-  const ids = isText ? S.regionTexts : S.regionIds;
+  const selSet = isText ? state.selText : state.sel;
+  const ids = Array.from(selSet);
   if (!ids.length) return;
   if (isText) { if (H.onExportText) H.onExportText({ format: 'md', ids: ids }); return; }
   const ok = ids.filter((id) => {
     const it = state.resources.find((r) => r.id === id);
     return it && it.status === 'ok';
   });
-  if (!ok.length) { if (H.onToast) H.onToast('这一区里的资源都不可达', { error: true }); return; }
-  if (H.onExport) H.onExport({ ids: ok, label: '预览区域' });
+  if (!ok.length) { if (H.onToast) H.onToast('所选资源都不可达', { error: true }); return; }
+  if (H.onExport) H.onExport({ ids: ok, label: '页面选区' });
 }
 
 /* ============================================================== 对外接口 */
@@ -1104,6 +1312,12 @@ export function refreshPreviewSelection() {
   syncSelection();
   applyVisibility();
   renderFoot();
+}
+
+export function remapLive() {
+  if (S.ready && S.doc && S.layer) {
+    remap(S.gen);
+  }
 }
 
 /** 从详情弹层跳回预览并定位某一项 */
@@ -1141,13 +1355,23 @@ export function disposePreview() {
   S.job = null;
   if (S.layer && S.layer.parentNode) S.layer.parentNode.removeChild(S.layer);
   if (S.host && S.host.parentNode) S.host.parentNode.removeChild(S.host);
-  S.host = null; S.layer = null; S.root = null; S.boxHost = null; S.cap = null; S.regionHost = null; S.regions = [];
+  S.host = null; S.layer = null; S.root = null; S.boxHost = null; S.cap = null; S.mq = null; S.mqBadge = null; S.regionHost = null; S.regions = [];
   S.frame = null; S.doc = null; S.win = null; S.stat = null; S.foot = null;
 }
 
 /** 重新扫描后地址变了：让快照按当前页重新载入 */
 export function reloadPreview() {
   if (!S.frame) return;
-  S.pageUrl = '';
-  loadFrame(++S.gen);
+  S.gen++;
+  clearTimers();
+  S.boxes = [];
+  S.ready = false;
+  S.job = state.job;
+  const pages = (state.pages && state.pages.length ? state.pages : [{ url: state.url, title: '主页面', main: true }]);
+  if (!S.pageUrl || !pages.some((pg) => pg.url === S.pageUrl)) {
+    const main = pages.find((pg) => pg.main) || pages[0];
+    S.pageUrl = main.url;
+  }
+  S.pageMeta = pages.find((pg) => pg.url === S.pageUrl) || pages[0];
+  loadFrame(S.gen);
 }

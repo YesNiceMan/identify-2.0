@@ -9,8 +9,8 @@ import {
   detailHtml, textDetailHtml, renderPolicy, policyModalHtml,
 } from './views.js';
 import {
-  renderPreviewStage, previewMounted, disposePreview, reloadPreview,
-  refreshPreviewSelection, locateInPreview, setPreviewMode, mountPreview,
+  renderPreviewStage, previewMounted, disposePreview, reloadPreview, remapLive,
+  refreshPreviewSelection, locateInPreview, setPreviewMode, setPreviewTool, mountPreview,
 } from './preview.js';
 import { Radar } from './radar.js';
 import { initCursor, initReveal, initScrambles, initMagnetic, attachTilt, flip, toast, scrollTo } from './fx.js';
@@ -64,6 +64,11 @@ async function boot() {
     onToast: toast,
     onSelectionChange: afterSelection,
     onShowCards: showCards,
+    onNavigate: (url) => {
+      $('#url').value = url;
+      $('#command').classList.add('has-value');
+      run(url, 'preview');
+    },
   });
   renderSpectre();
   renderTabs();
@@ -244,6 +249,13 @@ function wireConsole() {
   input.addEventListener('input', sync);
   $('#clear-url').addEventListener('click', () => { input.value = ''; sync(); input.focus(); });
   form.addEventListener('submit', (e) => { e.preventDefault(); run(input.value); });
+  const openBtn = $('#open-page');
+  if (openBtn) {
+    openBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      run(input.value, 'preview');
+    });
+  }
   $$('.stepper button').forEach((b) => b.addEventListener('click', () => {
     const node = $('#opt-crawl');
     const v = Math.max(0, Math.min(12, (Number(node.textContent) || 0) + Number(b.dataset.step)));
@@ -252,7 +264,7 @@ function wireConsole() {
   }));
 }
 
-async function run(raw) {
+async function run(raw, targetStage) {
   let url = String(raw || '').trim();
   if (!url) { toast('请先输入要解析的链接', { error: true }); $('#url').focus(); return; }
   if (!/^https?:\/\//i.test(url)) {
@@ -290,6 +302,10 @@ async function run(raw) {
   btn.classList.add('running');
   $('.label', btn).textContent = '扫描中';
   $('.hint', btn).textContent = 'SCANNING';
+  if (targetStage === 'preview') {
+    pendingStage = 'preview';
+    setStage('preview');
+  }
   renderSpectre();
   renderTabs();
   renderStage();
@@ -335,6 +351,7 @@ function subscribe(jobId) {
       radar.addNode(item.type);
       appendCard(item);
       liveCounters();
+      if (state.stage === 'preview') remapLive();
     },
     progress: (d) => {
       if (typeof d.progress === 'number') paintProgress(d.progress);
@@ -491,7 +508,7 @@ function setStage(next) {
   if (state.stage === next) return;
   state.stage = next;
   applyStage();
-  if (next === 'preview') scrollTo($('#results'), 10);
+  if (next === 'preview') scrollTo($('#command'), 20);
 }
 
 function retirePreview() {
@@ -732,6 +749,8 @@ function wireKeys() {
       else $('#export-all').click();
     }
     else if (k === 'g') $$('#view-seg button')[state.view === 'grid' ? 1 : 0].click();
+    else if (k === 'v') { if (state.stage === 'preview') setPreviewTool('pick'); }
+    else if (k === 'm') { if (state.stage === 'preview') setPreviewTool('marquee'); }
     else if (k === 'x') $('#clear-sel').click();
     else if (k === 'i') $('#url').focus();
     else if (k === 'p') setStage(state.stage === 'preview' ? 'list' : 'preview');

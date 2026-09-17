@@ -232,14 +232,25 @@ const PREVIEW_CSP = [
 ].join('; ');
 
 async function apiPreview(req, res, url) {
-  const job = getJob(url.searchParams.get('job'));
-  if (!job) return json(res, 404, { code: 'NO_JOB', message: '任务不存在或已过期，请重新扫描' });
-  const pages = previewPages(job);
-  const want = normalizeUrl(url.searchParams.get('page') || '') || '';
-  const entry = want ? pages.find((pg) => pg.url === want) : (pages.find((pg) => pg.main) || pages[0]);
-  if (!entry) return json(res, 403, { code: 'NO_PAGE', message: '这个地址不在本次扫描的页面里' });
-  const target = normalizeUrl(entry.url) || job.url;
-  const doc = await loadDoc(target, job.url);
+  const jobId = url.searchParams.get('job');
+  const job = jobId ? getJob(jobId) : null;
+  const want = normalizeUrl(url.searchParams.get('page') || url.searchParams.get('url') || (job && job.url) || '') || '';
+  if (!job && !want) return json(res, 400, { code: 'NO_URL', message: '缺少目标网址，请提供 page 或 job 参数' });
+  let target = want;
+  let jobUrl = job ? job.url : (want || '');
+  if (job) {
+    const pages = previewPages(job);
+    const entry = want ? pages.find((pg) => pg.url === want) : (pages.find((pg) => pg.main) || pages[0]);
+    if (entry) {
+      target = normalizeUrl(entry.url) || job.url;
+    } else if (want) {
+      target = normalizeUrl(want);
+    } else {
+      target = job.url;
+    }
+  }
+  if (!target) return json(res, 400, { code: 'NO_URL', message: '缺少目标网址' });
+  const doc = await loadDoc(target, jobUrl);
   const headers = {
     'cache-control': 'no-store',
     'content-security-policy': PREVIEW_CSP,
@@ -260,7 +271,7 @@ async function apiPreview(req, res, url) {
   const kind = passthroughType(doc.contentType);
   let payload;
   if (kind === 'text/html') {
-    payload = Buffer.from(buildPreview(doc.text, target, { jobUrl: job.url, truncated: doc.truncated }), 'utf-8');
+    payload = Buffer.from(buildPreview(doc.text, target, { jobUrl: jobUrl, truncated: doc.truncated }), 'utf-8');
   } else if (kind) {
     /* PDF / 图片 / 音视频：把原始字节交给浏览器自己渲染，一个字节都不动 */
     payload = doc.buffer;

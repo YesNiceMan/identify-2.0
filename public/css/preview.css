@@ -8,7 +8,37 @@
   padding: 0.55rem 0.7rem;
   border: 1px solid var(--line); border-radius: var(--r);
   background: var(--panel-2);
+  position: sticky; top: 0; z-index: 100;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.35);
 }
+.pv-url-box {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 0.2rem 0.5rem; min-width: 260px; max-width: 440px; flex: 1 1 300px;
+  transition: border-color 0.25s, box-shadow 0.25s;
+}
+.pv-url-box:focus-within {
+  border-color: rgba(184, 255, 60, 0.5);
+  box-shadow: 0 0 0 1px rgba(184, 255, 60, 0.2);
+}
+.pv-url-tag {
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.12em; color: var(--cyan);
+}
+.pv-url-input {
+  flex: 1; min-width: 0; background: none; border: 0; outline: none;
+  font-family: var(--mono); font-size: 11.5px; color: var(--ink);
+  padding: 0.2rem 0; caret-color: var(--lime);
+}
+.pv-url-input::placeholder { color: var(--dim); }
+.pv-url-btn {
+  border: 0; background: var(--lime); color: #04070a;
+  border-radius: 3px; font-family: var(--mono); font-size: 10px; font-weight: 800;
+  padding: 0.22rem 0.45rem; cursor: pointer; white-space: nowrap;
+  transition: transform 0.16s, filter 0.16s;
+}
+.pv-url-btn:hover { filter: brightness(1.1); transform: scale(1.02); }
+.pv-url-btn:active { transform: scale(0.98); }
 .pv-seg { display: flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; background: var(--panel); }
 .pv-seg button {
   border: 0; background: none; color: var(--dim); cursor: none;

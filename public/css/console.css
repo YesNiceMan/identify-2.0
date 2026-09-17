@@ -2,13 +2,18 @@
 .console { position: relative; }
 .command {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 1px;
   background: var(--line);
   border: 1px solid var(--line);
   border-radius: var(--r);
   overflow: hidden;
   transition: border-color 0.4s var(--ease), box-shadow 0.4s var(--ease), background 0.4s;
+}
+@media (max-width: 640px) {
+  .command {
+    grid-template-columns: 1fr;
+  }
 }
 .command:focus-within {
   border-color: rgba(184, 255, 60, 0.55);
@@ -51,6 +56,29 @@
 }
 .command.has-value .field .clear { opacity: 1; }
 .field .clear:hover { color: var(--pink); }
+
+.open-page-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  gap: 2px;
+  min-width: clamp(110px, 11vw, 150px);
+  padding: 0 1.2rem;
+  border: 0;
+  background: rgba(74, 217, 255, 0.08);
+  color: var(--cyan);
+  cursor: none;
+  overflow: hidden;
+  transition: background 0.3s var(--ease), color 0.3s var(--ease), transform 0.3s var(--ease), box-shadow 0.3s;
+}
+.open-page-btn:hover {
+  background: rgba(74, 217, 255, 0.2);
+  color: #fff;
+  box-shadow: inset 0 0 0 1px rgba(74, 217, 255, 0.45);
+}
+.open-page-btn:active { transform: scale(0.985); }
+.open-page-btn .label { font-weight: 700; font-size: 0.98rem; letter-spacing: 0.12em; }
+.open-page-btn .hint { font-family: var(--mono); font-size: 10px; letter-spacing: 0.18em; opacity: 0.65; }
 
 .ignite {
   position: relative;
