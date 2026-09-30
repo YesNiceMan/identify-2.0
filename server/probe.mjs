@@ -16,35 +16,12 @@ import {
   fontInfo as fontParse, icnsInfo as icnsParse, ddsInfo, exrInfo, pnmInfo, tgaInfo, qoiInfo,
 } from './containers.mjs';
 
-const u16le = (b, p) => (p + 1 < b.length ? b[p] | (b[p + 1] << 8) : 0);
-const u16be = (b, p) => (p + 1 < b.length ? (b[p] << 8) | b[p + 1] : 0);
-const u32le = (b, p) => (p + 3 < b.length ? ((b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0) : 0);
-const u32be = (b, p) => (p + 3 < b.length ? (((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) >>> 0) : 0);
-const i32be = (b, p) => (p + 3 < b.length ? ((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) | 0 : 0);
-const i32le = (b, p) => (p + 3 < b.length ? (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) | 0 : 0);
+/* 字节读取 / 标签查找统一走 bytes.mjs（原先这里抄了 8 个私有实现） */
+import {
+  u16le, u16be, u32le, u32be, i32be, i32le, u64be, i64le, f32be, f64be, ascii,
+  indexOfSeq, cstring as readText, compact,
+} from './bytes.mjs';
 
-function u64be(b, p) {
-  if (p + 7 >= b.length) return 0;
-  try { return Number(b.readBigUInt64BE(p)); } catch { return 0; }
-}
-function i64le(b, p) {
-  if (p + 7 >= b.length) return 0;
-  try { return Number(b.readBigInt64LE(p)); } catch { return 0; }
-}
-function f32be(b, p) {
-  if (p + 3 >= b.length) return 0;
-  try { return b.readFloatBE(p); } catch { return 0; }
-}
-function f64be(b, p) {
-  if (p + 7 >= b.length) return 0;
-  try { return b.readDoubleBE(p); } catch { return 0; }
-}
-function ascii(b, p, len) {
-  if (p < 0 || len <= 0 || p + len > b.length) return '';
-  let s = '';
-  for (let i = 0; i < len; i++) s += String.fromCharCode(b[p + i]);
-  return s;
-}
 function readLEBits(b, bitPos, len) {
   let v = 0;
   for (let i = 0; i < len; i++) {
@@ -54,26 +31,7 @@ function readLEBits(b, bitPos, len) {
   }
   return v;
 }
-/** 在字节流里查找一段 latin1 字符序列 */
-function indexOfSeq(buf, seq, from, to) {
-  const needle = Buffer.from(seq, 'latin1');
-  const start = Math.max(0, from || 0);
-  const end = Math.min(to == null ? buf.length : to, buf.length) - needle.length;
-  for (let p = start; p <= end; p++) {
-    let ok = true;
-    for (let j = 0; j < needle.length; j++) {
-      if (buf[p + j] !== needle[j]) { ok = false; break; }
-    }
-    if (ok) return p;
-  }
-  return -1;
-}
-function readText(b, at, max) {
-  if (at < 0) return '';
-  let s = '';
-  for (let i = at; i < b.length && b[i] && s.length < (max || 120); i++) s += String.fromCharCode(b[i]);
-  return s.trim();
-}
+
 
 /* ------------------------------------------------------------ 图片 */
 
@@ -518,10 +476,6 @@ function svgInfo(text) {
   return out;
 }
 
-/** 只看文本就能拿到的 SVG 元信息（用于尚未缓存全字节的场合） */
-export function svgMeta(text) {
-  try { return svgInfo(String(text || '')); } catch { return null; }
-}
 
 /* ----------------------------------------------------------- 视音频 */
 
@@ -585,12 +539,7 @@ function vp8KeyframeSize(b) {
   return null;
 }
 
-function compact(obj) {
-  if (!obj) return {};
-  const out = {};
-  for (const k of Object.keys(obj)) if (obj[k] !== null && obj[k] !== undefined && obj[k] !== '') out[k] = obj[k];
-  return out;
-}
+
 
 /* -------------------------------------------------------- MP4 / MOV */
 
@@ -994,25 +943,6 @@ function mp3Info(b) {
   return out;
 }
 
-/* -------------------------------------------------------- 文本类时长 */
-
-export function formatDuration(sec) {
-  if (sec == null || !Number.isFinite(sec) || sec <= 0) return '';
-  const s = Math.round(sec);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const r = s % 60;
-  const pad = (n) => (n < 10 ? '0' + n : String(n));
-  return (h ? pad(h) + ':' : '') + pad(m) + ':' + pad(r);
-}
-
-const ORIENTATION_TEXT = {
-  1: '正常', 2: '水平镜像', 3: '旋转 180°', 4: '垂直镜像',
-  5: '顺时针 90° + 镜像', 6: '顺时针 90°', 7: '逆时针 90° + 镜像', 8: '逆时针 90°',
-};
-export function orientationLabel(v) {
-  return ORIENTATION_TEXT[v] || (v ? '方向标记 ' + v : '');
-}
 
 /* ---------------------------------------------------------- 魔数签名 */
 

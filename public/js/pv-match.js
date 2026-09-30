@@ -312,19 +312,3 @@ export function regionOf(state) {
 export function regionLabel(kind) {
   return REGION_KINDS[kind] || '界面框架区域';
 }
-
-/** 一个真实 DOM 元素的区域结论（沿祖先链步进；根 -> 叶） */
-export function regionOfElement(node) {
-  let st = REGION_ROOT;
-  const chain = [];
-  for (let p = node; p && p.nodeType === 1; p = p.parentElement) chain.push(p);
-  chain.reverse();
-  for (const e of chain) {
-    st = regionStep(st, {
-      tag: String(e.tagName || '').toLowerCase(),
-      role: (e.getAttribute && e.getAttribute('role')) || '',
-      hint: (e.id || '') + ' ' + (typeof e.className === 'string' ? e.className : (e.getAttribute && e.getAttribute('class')) || ''),
-    });
-  }
-  return regionOf(st);
-}

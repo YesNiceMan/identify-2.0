@@ -151,4 +151,3 @@ body[data-stage="preview"] #stage-body { display: none; }
 }
 .pv-rg i { font-style: normal; color: #fff; background: rgba(255, 209, 102, 0.24); border-radius: 2px; padding: 0 3px; margin-left: 3px; }
 .pv-rg.zero { color: #7cf6b0; border-color: rgba(124, 246, 176, 0.36); background: rgba(124, 246, 176, 0.05); }
-.pv-shift { color: var(--dim); }

@@ -9,6 +9,10 @@
     "start": "node server/index.mjs",
     "dev": "node --watch server/index.mjs",
     "samples": "node scripts/make-samples.mjs",
-    "prestart": "node scripts/make-samples.mjs --quiet"
+    "prestart": "node scripts/make-samples.mjs --quiet",
+    "test": "node scripts/selftest.mjs && node scripts/selftest-store.mjs && node scripts/selftest-net.mjs && node scripts/check-structure.mjs",
+    "bench": "node scripts/bench.mjs 4",
+    "verify-export": "node scripts/verify-export.mjs",
+    "smoke": "node scripts/smoke-browser.mjs"
   }
 }

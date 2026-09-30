@@ -9,26 +9,8 @@
  */
 import zlib from 'node:zlib';
 
-const u16le = (b, p) => (p + 1 < b.length ? b[p] | (b[p + 1] << 8) : 0);
-const u32le = (b, p) => (p + 3 < b.length ? ((b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0) : 0);
-
-function ascii(b, p, len) {
-  if (p < 0 || len <= 0 || p + len > b.length) return '';
-  let s = '';
-  for (let i = 0; i < len; i++) s += String.fromCharCode(b[p + i]);
-  return s;
-}
-function clip(v, n) {
-  const s = String(v == null ? '' : v).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ').trim();
-  return s.length > n ? s.slice(0, n) + '…' : s;
-}
-function dropEmpty(obj) {
-  for (const k of Object.keys(obj)) {
-    if (obj[k] === 0 || obj[k] === '' || obj[k] == null || obj[k] === false) delete obj[k];
-    else if (Array.isArray(obj[k]) && !obj[k].length) delete obj[k];
-  }
-  return obj;
-}
+/* 字节读取 / 元数据清洗统一走 bytes.mjs */
+import { u16le, u32le, ascii, clip, dropEmpty } from './bytes.mjs';
 
 /* ----------------------------------------------------------- ZIP 目录 */
 

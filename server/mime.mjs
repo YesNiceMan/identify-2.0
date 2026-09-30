@@ -18,11 +18,11 @@ export const TYPES = {
   script: { label: '脚本', en: 'Scripts', color: '#f5d90a', glyph: '#!', tech: true },
   data: { label: '数据', en: 'Data', color: '#94a3b8', glyph: '⛁', tech: true },
   page: { label: '页面', en: 'Pages', color: '#cbd5e1', glyph: '⬜', tech: true },
-  other: { label: '其他', en: 'Other', color: '#64748b', glyph: '·', tech: true },
+  /* 颜色以暗色界面为准（public/js/util.js 同一份表，由 selftest §1.6 保证不漂移） */
+  other: { label: '其他', en: 'Other', color: '#8a9bb0', glyph: '·', tech: true },
 };
 
-/** 内容类别：图片 / 矢量 / 视音频 / 文档 / 表格 / 压缩包 / 三维模型 */
-export const CONTENT_TYPES = Object.keys(TYPES).filter((k) => !TYPES[k].chrome && !TYPES[k].tech);
+
 /** UI 界面图标一类的装饰资源 */
 export const CHROME_TYPES = Object.keys(TYPES).filter((k) => TYPES[k].chrome);
 /** 技术资源：字体、样式表、脚本、数据、页面、未知 */

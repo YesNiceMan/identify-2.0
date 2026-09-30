@@ -1,4 +1,4 @@
-import { $, $$, el, esc, bytesText, fmtMs, fmtNum, debounce, TYPES } from './util.js';
+import { $, $$, el, esc, bytesText, fmtMs, fmtNum, debounce, copyText, TYPES } from './util.js';
 import { startScan, streamJob, loadJob, bundle, exportText, reprobe, api, proxySrc } from './api.js';
 import {
   state, reset, putResource, putItems, putTexts, toggle, toggleText, clearSelection, pickSelection, visibleOrder,
@@ -184,11 +184,11 @@ const handlers = {
   onPolicy: (reason) => openModal(policyModalHtml(reason), null, null),
   onOpenText: (block) => openModal(textDetailHtml(block), null, block),
   onCopy: async (item) => {
-    const ok = await copy(item.url);
+    const ok = await copyText(item.url);
     toast(ok ? '地址已复制 · <b>' + esc(String(item.name || '').slice(0, 26)) + '</b>' : '复制失败', { error: !ok });
   },
   onCopyText: async (block) => {
-    const ok = await copy(block.text);
+    const ok = await copyText(block.text);
     toast(ok ? '文案已复制 · <b>' + fmtNum(block.chars) + '</b> 字' : '复制失败', { error: !ok });
   },
   onRetry: async (item) => {
@@ -215,9 +215,6 @@ const handlers = {
   },
 };
 
-async function copy(text) {
-  try { await navigator.clipboard.writeText(text); return true; } catch { return false; }
-}
 
 /** 只改勾选状态相关的 class，不重排列表（Shift 连选一次可能涉及上百项） */
 function paintPicked(ids, kind) {
@@ -412,7 +409,25 @@ function resetCounters() {
   $('#ov-total').textContent = '0';
 }
 
+let countersFrame = 0;
+/**
+ * 侧栏计数：扫描时每条 SSE 都会调用，这里合并到「每帧一次」。
+ * 原来每条资源都全表重算一遍 totals()，900 条就是 900 次全表扫描。
+ */
 function liveCounters() {
+  if (countersFrame) return;
+  countersFrame = requestAnimationFrame(() => {
+    countersFrame = 0;
+    const t = totals();
+    $('#c-found').textContent = fmtNum(t.total);
+    $('#c-text').textContent = fmtNum(t.texts);
+    $('#c-size').textContent = bytesText(t.bytes);
+    $('#c-size').title = fmtNum(t.bytes) + ' 字节';
+  });
+}
+/** 需要立刻拿到准确数字时用（扫描结束、结果落地） */
+function liveCountersNow() {
+  if (countersFrame) { cancelAnimationFrame(countersFrame); countersFrame = 0; }
   const t = totals();
   $('#c-found').textContent = fmtNum(t.total);
   $('#c-text').textContent = fmtNum(t.texts);
@@ -445,7 +460,7 @@ function applyResult(result, status) {
   $('#scope-phase').textContent = (status === 'error' ? '失败' : '完成') + ' · ' + fmtMs((result.stats && result.stats.duration) || 0);
   $('#c-refs').textContent = fmtNum(refsCount);
   paintProgress(100);
-  liveCounters();
+  liveCountersNow();
   if (presetType && !presetApplied) {
     state.filter.type = presetType;
     presetApplied = true;

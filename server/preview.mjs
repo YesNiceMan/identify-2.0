@@ -9,7 +9,7 @@
  *      内联 on* 处理器同样失效；保留同源是为了让外层界面能读 DOM 并叠加选择框。
  *   3. 不额外请求站点 —— 原始字节在扫描阶段已写入 .cache（键 = 页面地址 + #doc）。
  */
-import { grab, decodeText, charsetOf, readCached, writeCache } from './net.mjs';
+import { grab, decodeText, charsetOf, sniffCharset, readCached, writeCache } from './net.mjs';
 
 const DOC_SUFFIX = '#doc';
 
@@ -62,12 +62,6 @@ export async function loadDoc(url, referer) {
   }
 }
 
-function sniffCharset(buffer) {
-  if (!buffer || !buffer.length) return '';
-  const head = String(buffer.subarray(0, 4096).toString('latin1'));
-  const m = /<meta[^>]+charset=["']?([\w-]+)/i.exec(head);
-  return m ? m[1].toLowerCase() : '';
-}
 
 /* ------------------------------------------------------ 净化与注入 */
 

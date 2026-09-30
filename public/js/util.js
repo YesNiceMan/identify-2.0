@@ -95,25 +95,6 @@ export function pixels(w, h) {
   return w + '×' + h + (mp >= 1 ? ' · ' + mp.toFixed(1) + 'MP' : '');
 }
 
-export function countUp(node, to, opts) {
-  const o = opts || {};
-  const from = Number(o.from || 0);
-  const dur = o.duration || 900;
-  const fmt = o.format || ((v) => Math.round(v).toLocaleString('zh-CN'));
-  if (!node) return;
-  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    node.textContent = fmt(to);
-    return;
-  }
-  const start = performance.now();
-  function step(now) {
-    const t = Math.min(1, (now - start) / dur);
-    const eased = 1 - Math.pow(1 - t, 3);
-    node.textContent = fmt(from + (to - from) * eased);
-    if (t < 1) requestAnimationFrame(step);
-  }
-  requestAnimationFrame(step);
-}
 
 export function debounce(fn, ms) {
   let timer = null;
@@ -130,10 +111,6 @@ export function reduceMotion() {
   return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
-export function timeAgo(ts) {
-  const d = new Date(ts);
-  return d.toLocaleTimeString('zh-CN', { hour12: false });
-}
 
 export function hostUrl(u) {
   try { return new URL(u).host; } catch { return ''; }

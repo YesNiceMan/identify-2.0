@@ -1302,10 +1302,6 @@ function exportRegion() {
   if (H.onExport) H.onExport({ ids: ok, label: '页面选区' });
 }
 
-/* ============================================================== 对外接口 */
-
-export function previewActive() { return state.stage === 'preview'; }
-export function previewReady() { return !!S.ready; }
 
 export function refreshPreviewSelection() {
   if (!S.ready) return;

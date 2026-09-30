@@ -592,7 +592,7 @@ function parseSrcset(value) {
       const c = raw[i];
       if (c === ',') {
         /** 空白出现之前：data URI 与「已带查询逗号的地址」里的逗号属于 URL 本身 */
-        const keep = /^data:/i.test(url) || (/[?&;]/.test(url) && !/[(),]/.test(url));
+        const keep = isDataUri(url) || (/[?&;]/.test(url) && !/[(),]/.test(url));
         if (!keep) break;
       }
       url += c; i++;

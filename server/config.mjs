@@ -26,4 +26,10 @@ export const MAX_CSS_FILES = 40;
 /** 站内链接顺带扫描的最大页数 */
 export const MAX_PAGES = 12;
 export const REQUEST_TIMEOUT_MS = 20000;
+/**
+ * 单个资源探测的快超时（原 20s）：探测失败只把条目标成「不可达 / 可重试」，
+ * 但每条都死等 20 秒会把整轮扫描拖成长尾。快超时不等于判死——
+ * scan.mjs 命中后会再用 REQUEST_TIMEOUT_MS 认真试一次，识别完整度不受影响。
+ */
+export const PROBE_TIMEOUT_MS = Number(process.env.IDENTIFY_PROBE_TIMEOUT || 8000);
 export const CACHE_TTL_MS = 24 * 60 * 60 * 1000;

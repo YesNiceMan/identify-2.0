@@ -2,7 +2,6 @@
  * 扫描编排：抓取 → 解析 → 深度解析 CSS → 逐个探测元数据 → 分类统计
  * 任务状态通过 SSE 推送，前端可流式渲染结果。
  */
-import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { extractPage, extractCss } from './extract.mjs';
 import { TYPES, extFromPath, extFromMime, typeFromExt, guessMime, previewable, assetFamily } from './mime.mjs';
@@ -12,15 +11,19 @@ import { imageDimensions, mediaMeta, detectSignature, looksTextual, textSample, 
 import { pdfMeta, officeMeta, playlistMeta } from './docmeta.mjs';
 import {
   grab, decodeText, charsetOf, normalizeUrl, hostOf, sameOrigin, filenameFromUrl, shortHash,
-  readCacheMeta, readCacheBuffer, writeCache, cachePath,
+  readCacheMeta, readCacheHead, writeCache, sniffCharset,
 } from './net.mjs';
 import { rememberDoc } from './preview.mjs';
-import { MAX_DOC_BYTES, MAX_ASSET_BYTES, MAX_RESOURCES, MAX_CSS_FILES, MAX_PAGES, PROBE_HEAD_BYTES } from './config.mjs';
+import { MAX_DOC_BYTES, MAX_ASSET_BYTES, MAX_RESOURCES, MAX_CSS_FILES, MAX_PAGES, PROBE_HEAD_BYTES, PROBE_TIMEOUT_MS } from './config.mjs';
 
 const FULL_LIMIT_IMAGE = 14 * 1024 * 1024;
 const FULL_LIMIT_MEDIA = 8 * 1024 * 1024;
 const FULL_LIMIT_DOC = 10 * 1024 * 1024;
-const CONCURRENCY = 6;
+/**
+ * 并发：扫描时间几乎都花在等网络上，所以并发是第一生产力。
+ * 默认 12（原 6）；站点限流时用 IDENTIFY_CONCURRENCY 调小即可。
+ */
+const CONCURRENCY = Math.max(2, Math.min(32, Number(process.env.IDENTIFY_CONCURRENCY) || 12));
 const TIME_BUDGET_MS = Number(process.env.IDENTIFY_BUDGET || 75000);
 
 const jobs = new Map();
@@ -301,7 +304,6 @@ async function run(job) {
             emit(job, { type: 'progress', progress: pct, done: completed, total: limited.length });
           }
         }
-        await new Promise((r) => setImmediate(r));
       }
     })());
   }
@@ -526,36 +528,54 @@ async function probeRef(job, ref) {
 
   if (cached) {
     item.cached = true;
-    head = readHeadFile(url, PROBE_HEAD_BYTES);
+    head = readCacheHead(url, PROBE_HEAD_BYTES);
     item.status = 'ok';
     item.http = cached.meta.status || 200;
-    if (!mime) {
-      try {
-        const guessSig = detectSignature(head || Buffer.alloc(0));
-        if (guessSig) mime = guessSig.mime;
-      } catch { /* noop */ }
+    if (!mime && head) {
+      const guessSig = detectSignature(head);
+      if (guessSig) mime = guessSig.mime;
     }
   } else {
     try {
-      const got = await grab(url, {
+      /**
+       * 一条请求拿两样东西：不发 Range，只把读取上限设为探测窗口，
+       * 但告诉 grab「本站点这个体积以内我本来就要全量」——服务端在 Content-Length 里
+       * 报明的体积不超过它，这一次连接就把整份读完（whole）；否则读到窗口就取消，
+       * 与纯头部探测等价。原实现是「Range 拿头部 + 再发一条拿全量」，
+       * 同一份字节传两遍、还多一次往返与 TLS 冷启动。
+       */
+      const probeOpts = {
         maxBytes: PROBE_HEAD_BYTES,
-        range: 'bytes=0-' + (PROBE_HEAD_BYTES - 1),
+        fitsBytes: fullLimitFor(item),
         referer: job.url,
         retries: 0,
-      });
+      };
+      let got;
+      try {
+        got = await grab(url, Object.assign({ timeoutMs: PROBE_TIMEOUT_MS }, probeOpts));
+      } catch (probeErr) {
+        /* 快超时只砍长尾、不判死：慢站点再按常规超时认真试一次 */
+        if (!/timeout|abort/i.test(String((probeErr && probeErr.message) || probeErr))) throw probeErr;
+        got = await grab(url, probeOpts);
+      }
       item.http = got.status;
       head = got.body;
       mime = got.contentType;
       total = got.totalBytes != null ? got.totalBytes : (got.status === 200 ? got.bytes : null);
       if (got.ok) {
         item.status = 'ok';
+        if (got.whole) {
+          item.wholeFromHead = true;
+          item.hash = sha1(head);
+          item.cached = await writeCache(url, { buffer: head, contentType: mime, status: got.status, finalUrl: got.finalUrl, hash: item.hash });
+        }
       } else {
         item.status = got.status === 404 || got.status === 410 ? 'missing' : got.status === 403 || got.status === 401 ? 'blocked' : 'error';
         item.error = 'HTTP ' + got.status;
         return finishItem(job, item, null);
       }
     } catch (err) {
-      item.status = /ENOTFOUND|EAI_AGAIN/.test(err.message) ? 'dns' : /timeout|abort/i.test(err.message) ? 'timeout' : 'error';
+      item.status = /ENOTFOUND|EAI_AGAIN/.test(String(err.message)) ? 'dns' : /timeout|abort/i.test(String(err.message)) ? 'timeout' : 'error';
       item.error = (err.message || '网络错误').slice(0, 140);
       return finishItem(job, item, null);
     }
@@ -582,14 +602,16 @@ async function probeRef(job, ref) {
   if (!item.ext) item.ext = extFromMime(item.mime) || '';
   item.size = total != null ? total : (head ? head.length : null);
 
-  /* 小文件直接完整下载并缓存（用于精确尺寸与后续导出） */
+  /* 完整字节：优先复用已拿到的（缓存 / 探测那条请求带回的全量），只有确实缺才再发一次请求 */
   let full = null;
-  const limit = item.type === 'video' || item.type === 'audio' ? FULL_LIMIT_MEDIA : item.type === 'image' ? FULL_LIMIT_IMAGE : FULL_LIMIT_DOC;
-  if (cached && item.size && item.size <= MAX_ASSET_BYTES) {
-    full = readHeadFile(url, MAX_ASSET_BYTES);
-    /* 命中缓存时也要有指纹，否则「重复内容」标不出来 */
-    if (full && full.length === item.size && !item.hash) {
-      item.hash = crypto.createHash('sha1').update(full).digest('hex').slice(0, 16);
+  const limit = fullLimitFor(item);
+  if (item.wholeFromHead && head) {
+    full = head;
+  } else if (cached && item.size && item.size <= MAX_ASSET_BYTES) {
+    full = readCacheHead(url, MAX_ASSET_BYTES);
+    /* 命中缓存时也要有指纹，否则「重复内容」标不出来（指纹随缓存存过就直接取） */
+    if (full && full.length === item.size) {
+      item.hash = cached.meta.hash || sha1(full);
       if (!item.mime) item.mime = cached.meta.contentType || guessMime(item.type, item.ext);
     }
   } else if (!cached && item.size && item.size <= limit) {
@@ -600,7 +622,7 @@ async function probeRef(job, ref) {
         item.cached = await writeCache(url, { buffer: full, contentType: got.contentType || mime, status: got.status, finalUrl: got.finalUrl });
         item.size = full.length;
         if (!head || full.length > head.length) head = full;
-        item.hash = crypto.createHash('sha1').update(full).digest('hex').slice(0, 16);
+        item.hash = sha1(full);
       }
     } catch { /* 保留头部信息 */ }
   } else if (!cached) {
@@ -636,6 +658,7 @@ function finishItem(job, item, full) {
   }
   if (!item.format) item.format = formatHint(item);
   delete item.index0;
+  delete item.wholeFromHead;
   return item;
 }
 
@@ -780,19 +803,6 @@ function copyMeta(item, meta) {
   }
 }
 
-function readHeadFile(url, maxBytes) {
-  const p = cachePath(url);
-  try {
-    const st = fs.statSync(p);
-    const len = Math.min(st.size, maxBytes);
-    const fd = fs.openSync(p, 'r');
-    try {
-      const buf = Buffer.alloc(len);
-      fs.readSync(fd, buf, 0, len, 0);
-      return buf;
-    } finally { fs.closeSync(fd); }
-  } catch { return null; }
-}
 
 /* ------------------------------------------------------------- 统计 */
 
@@ -963,12 +973,6 @@ export async function reprobeItems(job, urls = [], ids = []) {
   return updated;
 }
 
-export function rebuildStats(job) {
-  const result = job.result;
-  if (!result) return null;
-  result.stats = buildStats(job, result.resources, result);
-  return result.stats;
-}
 
 export function inlineAsset(jobId, itemId) {
   const job = getJob(jobId);
@@ -1012,18 +1016,29 @@ function round(v, d) {
   return Math.round(v * p) / p;
 }
 
+/** 内容指纹（sha1 前 16 位）：比 md5 更快，够用来标「重复内容」 */
+function sha1(buffer) {
+  return crypto.createHash('sha1').update(buffer).digest('hex').slice(0, 16);
+}
+
+/**
+ * 该类别「探测阶段就顺手全量下载」的上限：音视频按容器上限，
+ * 图片给最宽（内容图动辄几 MB，本来也要全量），其余按文档上限。
+ * 超过它就只读头部，导出时再按需取全量。
+ */
+function fullLimitFor(item) {
+  const t = item && item.type;
+  if (t === 'video' || t === 'audio') return FULL_LIMIT_MEDIA;
+  if (t === 'image' || t === 'vector' || t === 'icon') return FULL_LIMIT_IMAGE;
+  return FULL_LIMIT_DOC;
+}
+
 function formatHint(item) {
   if (item.ext && TYPES[item.type]) return String(item.ext).toUpperCase();
   const m = /\/([a-z0-9.+-]+)/i.exec(item.mime || '');
   return m ? m[1].toUpperCase() : String(item.type).toUpperCase();
 }
 
-function sniffCharset(buffer) {
-  if (!buffer || !buffer.length) return '';
-  const head = String(buffer.subarray(0, 4096).toString('latin1'));
-  const m = /<meta[^>]+charset=["']?([\w-]+)/i.exec(head) || /charset=([\w-]+)/i.exec(head);
-  return m ? m[1].toLowerCase() : '';
-}
 
 const DATA_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/svg+xml': 'svg', 'image/gif': 'gif', 'image/webp': 'webp', 'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'video/mp4': 'mp4', 'application/pdf': 'pdf', 'font/woff2': 'woff2', 'font/woff': 'woff', 'application/json': 'json', 'text/plain': 'txt', 'text/css': 'css', 'text/javascript': 'js' };
 

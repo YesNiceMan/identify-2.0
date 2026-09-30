@@ -11,53 +11,14 @@
  *   以及 QOI / DDS / OpenEXR / PNM / TGA 的头字段
  */
 
-const u8 = (b, p) => (p < b.length ? b[p] : 0);
-const u16le = (b, p) => (p + 1 < b.length ? b[p] | (b[p + 1] << 8) : 0);
-const u16be = (b, p) => (p + 1 < b.length ? (b[p] << 8) | b[p + 1] : 0);
-const u32le = (b, p) => (p + 3 < b.length ? ((b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0) : 0);
-const u32be = (b, p) => (p + 3 < b.length ? (((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) >>> 0) : 0);
-const i32le = (b, p) => (p + 3 < b.length ? (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) | 0 : 0);
-const i32be = (b, p) => (p + 3 < b.length ? ((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) | 0 : 0);
+/* 字节读取 / 标签查找 / 元数据清洗统一走 bytes.mjs（原先这里抄了 9 个私有实现） */
+import {
+  u8, u16le, u16be, u32le, u32be, i32le, i32be, i16be as i32s, u64be, f64be as readDouble,
+  ascii, indexOfSeq, clip, dropEmpty,
+} from './bytes.mjs';
+
 const C9 = String.fromCharCode(0xa9);
-
-const i32s = (b, p) => (p + 1 < b.length ? (((b[p] << 8) | b[p + 1]) << 16 >> 16) : 0);
 const hex4 = (n) => ('000' + (Number(n) >>> 0).toString(16).toUpperCase()).slice(-4);
-
-
-function u64be(b, p) {
-  if (p + 7 >= b.length) return 0;
-  try { return Number(b.readBigUInt64BE(p)); } catch { return 0; }
-}
-function ascii(b, p, len) {
-  if (p < 0 || len <= 0 || p + len > b.length) return '';
-  let s = '';
-  for (let i = 0; i < len; i++) s += String.fromCharCode(b[p + i]);
-  return s;
-}
-function clip(v, n) {
-  const s = String(v == null ? '' : v).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ');
-  return s.length > n ? s.slice(0, n) + '…' : s.trim();
-}
-function indexOfSeq(buf, seq, from, to) {
-  const needle = Buffer.from(String(seq), 'latin1');
-  const start = Math.max(0, from || 0);
-  const end = Math.min(to == null ? buf.length : to, buf.length) - needle.length;
-  for (let p = start; p <= end; p++) {
-    let ok = true;
-    for (let j = 0; j < needle.length; j++) {
-      if (buf[p + j] !== needle[j]) { ok = false; break; }
-    }
-    if (ok) return p;
-  }
-  return -1;
-}
-function dropEmpty(obj) {
-  for (const k of Object.keys(obj)) {
-    if (obj[k] === 0 || obj[k] === '' || obj[k] == null || obj[k] === false) delete obj[k];
-    else if (Array.isArray(obj[k]) && !obj[k].length) delete obj[k];
-  }
-  return obj;
-}
 /** Mac 时间戳（自 1904-01-01）→ ISO 日期 */
 function macTime(v) {
   if (!v || v < 2082844800 || v > 6e9) return '';
@@ -454,10 +415,7 @@ export function flvInfo(b) {
   return dropEmpty(out);
 }
 
-function readDouble(b, p) {
-  if (p + 7 >= b.length) return 0;
-  try { return b.readDoubleBE(p); } catch { return 0; }
-}
+
 
 /** 只读 AMF0 头部的键值（够取 width/height/duration/framerate/videodatarate 等） */
 export function amf0Meta(body) {

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { extractPage, extractCss } from '../server/extract.mjs';
 import { ZipWriter } from '../server/zip.mjs';
 import { imageDimensions, mediaMeta, detectSignature, looksTextual } from '../server/probe.mjs';
-import { classify, extFromPath, typeFromExt } from '../server/mime.mjs';
+import { classify, extFromPath, typeFromExt, TYPES } from '../server/mime.mjs';
 import { preFilter, postFilter, contentSignal, summarize, trimFiltered, MAX_FILTERED_DETAIL } from '../server/policy.mjs';
 import { urlMeta, declaredEdge } from '../server/urlmeta.mjs';
 import { pdfMeta, officeMeta, playlistMeta } from '../server/docmeta.mjs';
@@ -373,6 +373,19 @@ ok(Math.abs(PM.overlap(BB, PM.box(20, 10, 20, 20)) - 0.5) < 1e-9, '半重叠为 
 ok(PM.overlap(BB, PM.box(100, 100, 10, 10)) === 0, '不相交为 0');
 ok(PM.overlap(PM.box(0, 0, 4, 4), PM.box(-20, -20, 100, 100)) === 1, '小框被完全包含为 1');
 ok(PM.INLINE_TAGS.join(',') === 'a,span,strong,em,b,i,u,s,small,code,kbd,samp,var,sub,sup,mark,time,abbr,q,cite,label,font,big,tt,ins,del,nobr,output,data'.split(',').join(','), '内联标签表镜像正确');
+
+/* 1.6 类型表前后端一致（颜色 / 中文名 / 字形一旦漂移，
+ *     侧栏与卡片各画一套色，导出目录名也会和界面对不上） */
+{
+  const U = await import('../public/js/util.js');
+  const S = TYPES;
+  const C = U.TYPES;
+  const shared = Object.keys(S);
+  ok(shared.every((k) => C[k]) && Object.keys(C).filter((k) => k !== 'text').every((k) => S[k]),
+    '类型表前后端键一致', shared.join(','));
+  const drift = shared.filter((k) => !C[k] || C[k].label !== S[k].label || C[k].en !== S[k].en || C[k].color !== S[k].color || C[k].glyph !== S[k].glyph);
+  ok(drift.length === 0, '类型表前后端名称/颜色/字形逐字段一致', drift.join(',') || 'ok');
+}
 
 console.log('\n\u001b[1m11. 扫描区域（只扫描主体内容区）\u001b[0m');
 const RG = await import('../server/region.mjs');

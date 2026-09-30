@@ -28,8 +28,29 @@ npm start          # 自动生成样本资源并启动 → http://127.0.0.1:4620
 PORT=5000 npm start        # 换端口
 npm run dev                # --watch 热重启
 npm run samples            # 重新生成 public/samples
-node scripts/selftest.mjs  # 离线自检（解析 / 分类 / 策略 / 区域 / 元数据 / ZIP / 选择逻辑，271 条断言）
 ```
+
+六道回归闸门（全部零依赖；前四条纯离线，`npm test` 一次跑完）：
+
+```bash
+node scripts/selftest.mjs         # 离线自检：解析 / 分类 / 策略 / 区域 / 元数据 / ZIP / 选择逻辑（273 条断言）
+node scripts/selftest-store.mjs   # 前端状态层单测：缓存失效、筛选字段、Shift 连选、排序（45 条）
+node scripts/selftest-net.mjs     # 抓取边界自检：gzip / Range / 门槛内一次读全 / 残件不当全量（14 条）
+node scripts/check-structure.mjs  # 结构体检：具名 import 是否都有出处 + 无人引用的导出（304 处全对）
+npm run bench                     # 扫描速度基准（见「性能：扫描为什么快」）
+npm run smoke                     # 浏览器冒烟：扫描→计数→搜索→排序→勾选→⇧连选→切类型→预览（15 条）
+```
+
+最后一条补的是空白处：前五条验的都是「解析出的事实对不对」，看不见界面跑不跑得起来。
+它用无头 Chrome 直连 CDP 真点一遍（前端把派生结果缓存化后，最容易漏的就是「筛完不重算」），
+自己起应用与基准站、全程只访问 127.0.0.1，并把控制台报错与未捕获异常算作失败；
+没装 Chrome 的机器打印跳过并按成功退出。CDP 客户端同样是零依赖手写的
+（`scripts/cdp-ws.mjs` —— Node 内置的 WebSocket 连本机 DevTools 会被 1006 掐断）。
+
+另有三个取证脚本，改动网络/导出路径时用来定位问题：
+`scripts/verify-export.mjs`（导出逐文件 md5 对回磁盘原始字节，`npm run verify-export`）、
+`scripts/scan-dump.mjs <出参> [目标]`（把扫描结果拍成可 diff 的指纹，改前后各存一份即可对照）、
+`scripts/trace-sse.mjs`（SSE 事件到达时间轴，看长尾卡在哪一条）。
 
 ## 扫描策略：哪些东西不去扫描
 
@@ -256,14 +277,63 @@ list-style / cursor，含 `::before`、`::after`）→ 解析器记下的 CSS �
 * 解析器不执行 JavaScript，纯客户端渲染的站点可用「站内顺带扫描」与脚本地址推断兜底；
   若目标不可达，条目会以对应状态保留在结果里而不是消失。
 
+## 性能：扫描为什么快
+
+扫描时间几乎都花在等网络，所以优化的核心是**减少往返次数**，而不是抠 CPU。
+`scripts/bench-site.mjs` 会生成一个 328 个引用的本地基准站（真实 PNG / JPEG / GIF / WAV / SVG / PDF / m3u8、
+二级 `@import`、懒加载、页眉页脚噪声、JSON 数据岛），`npm run bench` 拿它跑对照：
+
+| 指标（本地基准站，3 次取最快） | 优化前 | 现在 |
+| --- | --- | --- |
+| 上游请求数 | 505 | **274**（约等于资源数 1 条 / 资源；带 Range 的重发降到 0） |
+| 线上传输字节 | 57.3 MB | **30.8 MB** |
+| 总耗时 | 169 ms | **116 ms**（机器空载；有负载时 133–144 ms） |
+
+请求数与字节数是确定的，耗时随本机负载浮动。本地回环几乎没有延迟，所以 169→116ms 是这一项的**下限**；
+真实网络上每次省掉的往返都值几十毫秒，
+请求数减半带来的差距会远大于此。识别结果与优化前逐字段一致（`scripts/scan-dump.mjs` 指纹 0 差异），
+导出字节仍然逐字节相同（`scripts/verify-export.mjs`：231 项 md5 全对）。
+
+具体做掉的几件事：
+
+* **探测与取全量合成一条请求**。原来每个资源要发两条：先 `Range: bytes=0-262143` 拿头部，
+  再无条件重发一次拿全量——同一份字节传了两遍。现在探测请求不带 Range，读取上限设为探测窗口，
+  同时把「这个体积以内我本来就要全量」告诉 `grab()`：服务端在 `Content-Length` 里报明的体积不超过它，
+  这一次连接就把整份读完；超过就读到窗口立刻取消，与纯头部探测等价。
+* **并发 6 → 12**（`IDENTIFY_CONCURRENCY` 可调）。瓶颈是等，不是算。
+* **探测超时 20s → 8s**（`IDENTIFY_PROBE_TIMEOUT`）。慢站点上每条死等 20 秒会把整轮扫描拖成长尾；
+  快超时只用来砍长尾、不判死——命中后仍按常规 20s 认真重试一次，识别完整度不受影响。
+* **缓存元信息走内存索引**。同一个地址一轮扫描里要被查很多次，原来每次都
+  `existsSync`×2 + `statSync` + `readFileSync`；现在命中内存索引直接返回，内容指纹也随缓存存下来，
+  重复扫描不再把整份文件重算一遍哈希。
+* **去掉每条资源一次的 `setImmediate` 让位**，以及把「头部 / 全量」两套读文件代码收敛成一个 `readCacheHead()`。
+* **前端派生结果按版本缓存**（`public/js/store.js`）。扫描时每条 SSE 都会重读可见列表、分类计数、总计，
+  原来是「资源数 × 资源数」的白工；现在按「数据版本 + 筛选/排序签名」缓存，900 条逐条推进的模拟下 1.7×。
+  卡片淡入也从每卡一个 `setTimeout` 改成一条 rAF 链（一屏 900 张不再挂 900 个定时器）。
+
+### 环境变量
+
+| 变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `IDENTIFY_CONCURRENCY` | 12 | 探测并发数（2–32）。目标站限流 / 返回 429 时调小 |
+| `IDENTIFY_PROBE_TIMEOUT` | 8000 | 单个资源探测的快超时（毫秒），超时后仍会按常规超时重试一次 |
+| `IDENTIFY_BUDGET` | 75000 | 一轮扫描的总时间预算（毫秒）。CSS 递归阶段到点即停；探测阶段超出后剩余条目记为「超出时间预算」，已识别结果照常交付 |
+| `REQUEST_TIMEOUT_MS`（写在 `server/config.mjs`，暂不读环境变量） | 20000 | 常规请求超时：文档、导出、以及慢站点探测超时后的那次重试 |
+| `IDENTIFY_UA` | Chrome 126 UA | 出站 User-Agent |
+| `IDENTIFY_DEBUG` | 关 | 置任意值则服务端打印调试日志 |
+| `PORT` / `HOST` | 4620 / 127.0.0.1 | 监听地址 |
+
 ## 目录结构
 
 ```text
-server/   config.mjs  mime.mjs  net.mjs  urlmeta.mjs  region.mjs  policy.mjs  probe.mjs  containers.mjs
-          docmeta.mjs  lazy-attrs.mjs  extract.mjs  preview.mjs  scan.mjs  zip.mjs  index.mjs
+server/   config.mjs  bytes.mjs  mime.mjs  net.mjs  urlmeta.mjs  region.mjs  policy.mjs
+          probe.mjs  containers.mjs  docmeta.mjs  lazy-attrs.mjs  extract.mjs
+          preview.mjs  scan.mjs  zip.mjs  index.mjs
 public/   index.html  css/(base|console|results|preview).css
           js/(app|store|views|api|radar|fx|util|preview|pv-match).js  samples/
-scripts/  make-samples.mjs  selftest.mjs  inspect-job.mjs
+scripts/  make-samples.mjs  selftest.mjs  selftest-store.mjs  selftest-net.mjs
+          check-structure.mjs  smoke-browser.mjs  smoke-page.js  cdp-ws.mjs
+          bench.mjs  bench-site.mjs  verify-export.mjs  scan-dump.mjs  trace-sse.mjs  inspect-job.mjs
 ```
 
 * `extract.mjs` —— 手写容错 HTML 解析（隐式闭合、srcset、CSS url / @import、image-set 的 url() 与裸字符串两种写法、data URI（方案名大小写不敏感）、行号定位、文案分区）
@@ -278,7 +348,9 @@ scripts/  make-samples.mjs  selftest.mjs  inspect-job.mjs
 * `probe.mjs` —— 魔数与图像 / 视音频容器元数据（全部大端 / 小端按规范读取，扩展名与 MIME 以魔数为准）
 * `containers.mjs` —— 字体表目录（sfnt / WOFF / WOFF2）、ICO / ICNS 图标集、DDS / EXR / PNM / TGA / QOI
 * `docmeta.mjs` —— PDF 信息字典与页面尺寸、OOXML / ODF / EPUB、HLS 与 DASH 清单
-* `scan.mjs` —— 任务引擎：抓取 → 解析 → 递归 CSS → 站内顺带扫描 → 策略过滤 → 6 路并发探测（75s 预算）→ 深度容器解析 → 归并统计
+* `scan.mjs` —— 任务引擎：抓取 → 解析 → 递归 CSS → 站内顺带扫描 → 策略过滤（零请求）→ 12 路并发探测（75s 预算）→ 深度容器解析 → 归并统计
+* `bytes.mjs` —— 字节读取工具的唯一实现（大小端取数、latin1 标签查找、元数据清洗）；
+  原先 probe / containers / docmeta 三个模块各抄了一份，边界判断还不一致
 * `zip.mjs` —— 流式 ZIP 写入器（UTF-8 文件名标志、crc32 表、deflate 与 store 回退、目录项）
 
 ## 验收基线
@@ -291,12 +363,15 @@ scripts/  make-samples.mjs  selftest.mjs  inspect-job.mjs
 | `https://www.apple.com/` | 255 | 309 | 引用 正文 256 · 未定性 127 · 正文外 3；文案 正文 40 / 正文外 104 | 字体 144、页面 107、图标 35、脚本 12、样式表 9、像素 2；153 项 ≥600px 内容图完整保留；两种扫描范围结果一致（导航 / 页脚图标都在**外链 CSS** 里，按设计不做区域判定），但正文外文案精准命中 87 条导航 + 17 条页脚免责 |
 | `https://www.bing.com/` | 5 | 99 | 引用 未定性 76 · 正文外 3；文案 正文外 17 | 1920×1200 / 1366×768 两张当日壁纸**照常保留**——它们挂在 `ul.share` 里，靠「命名推断区 + `a[download]` 例外」不被误杀；搜索框、麦克风、菜单、关闭等按钮图标按选择器 / 真实尺寸排除 |
 
-预览侧基线（无头 Chrome 实跑，非自检覆盖）：`/samples/lab` 的 30 项资源有 28 项、56 段文案全部能定位回元素，
+其中「搜索 / 排序 / 勾选 / ⇧ 连选 / 切类型 / 开预览」这些交互已由 `npm run smoke` 自动跑（15 条，含控制台零报错），
+下面记录的是仍需人眼看的部分（像素级吻合与真实站点表现）：
+
+预览侧基线（无头 Chrome 实跑）：`/samples/lab` 的 30 项资源有 28 项、56 段文案全部能定位回元素，
 36 处资源标记 + 56 处文案标记与元素矩形逐像素吻合；区域框选 → 导出 ZIP、区域文案 → md 均在浏览器里跑通。
 **区域标注**：预览里画出 6 条区域带（页眉 1440×1222、导航菜单、侧栏、推广条（点线框 +「按命名推断」）、页脚、绿色正文带）。
 **Shift 连选**：展台卡片点第 3 张 + ⇧ 点第 9 张 → 选中 7 项；预览叠加层 ⇧ 点选 → 区间 18 项；
 文案模式 ⇧ 点选 → 区间 10 段，提示条均正确显示「Shift 连续多选 · 区间 N 项（新增 M）」。
-自检 `node scripts/selftest.mjs` 共 271 条断言，含预览净化（剥脚本 / 单一 `<base>` / 去 `http-equiv`）、
+自检 `node scripts/selftest.mjs` 共 273 条断言，含预览净化（剥脚本 / 单一 `<base>` / 去 `http-equiv`）、
 区域判定（10 条祖先链前后端逐格比对、粘连词根、章节例外、`mergeZone` 优先级、样本页 6 个标本、`preFilter` 开关双向）
 与选择逻辑（`visibleOrder` / `pickSelection` 区间只加不减、锚点越界退化、图文锚点互不干扰），
 以及前后端口径一致（`absKey` ≡ `normalizeUrl`、懒加载属性表逐字相同、内联资源键同构、srcset 与 CSS 抽取一致）。

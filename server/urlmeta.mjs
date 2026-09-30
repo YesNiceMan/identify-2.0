@@ -560,22 +560,3 @@ export function declaredEdge(m) {
   if (!m) return 0;
   return Math.max(num(m.width || m.w || 0), num(m.height || m.h || 0));
 }
-
-/** 地址里能不能读出「这大概率是一张图」 */
-export function urlImageSignals(m) {
-  if (!m) return false;
-  if (m.ext) {
-    const t = typeFromExt(m.ext);
-    if (t === 'image' || t === 'vector' || t === 'icon') return true;
-  }
-  return !!(m.width || m.quality || m.dpr);
-}
-
-/** 地址是否明确指向图片 / 矢量（用于救回没有扩展名的内容图） */
-export function urlLooksVisual(raw) {
-  const m = urlMeta(raw);
-  const ext = m.ext;
-  if (!ext) return false;
-  const t = typeFromExt(ext);
-  return t === 'image' || t === 'vector' || t === 'icon';
-}

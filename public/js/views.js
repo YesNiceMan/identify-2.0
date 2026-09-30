@@ -1,6 +1,6 @@
 import { $, el, esc, fmtBytes, bytesText, fmtDuration, fmtNum, pixels, typeOf, TYPES, TYPE_ORDER, PROV_LABEL, hostUrl } from './util.js';
 import { proxySrc, downloadSrc } from './api.js';
-import { state, counts, visibleItems, visibleTexts, totals, selectionBytes, selectedItems } from './store.js';
+import { state, counts, visibleItems, visibleTexts, totals, selectionBytes, selectedItems, matchesFilter } from './store.js';
 import { regionLabel } from './pv-match.js';
 
 let H = {};
@@ -250,12 +250,23 @@ export function renderStage() {
   return grid;
 }
 
+/**
+ * 卡片逐个淡入。原来每张卡各挂一个 setTimeout —— 一屏 900 张就是 900 个定时器，
+ * 全在渲染线程上排队。这里改成一条 rAF 链：按帧配额推进，
+ * 约 700ms（原来最后一张的时间）内全部出现，观感一致、定时器为零。
+ */
 function revealChildren(container) {
-  const nodes = Array.prototype.slice.call(container.children);
-  nodes.forEach((node, i) => {
-    const delay = Math.min(i, 26) * 26;
-    setTimeout(() => node.classList.add('in'), delay);
-  });
+  const nodes = container.children;
+  if (!nodes.length) return;
+  const perFrame = Math.max(4, Math.ceil(nodes.length / 42));
+  let i = 0;
+  const step = () => {
+    if (!nodes[0] || !nodes[0].isConnected) return;   /* 容器已被重绘替换 */
+    const stop = Math.min(nodes.length, i + perFrame);
+    for (; i < stop; i++) nodes[i].classList.add('in');
+    if (i < nodes.length) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 export function appendCard(item) {
@@ -272,18 +283,9 @@ export function appendCard(item) {
   requestAnimationFrame(() => card.classList.add('in'));
 }
 
-function matchesFilter(item) {
-  const f = state.filter;
-  if (f.type !== 'all' && item.type !== f.type) return false;
-  if (f.onlySel && !state.sel.has(item.id)) return false;
-  if (f.onlyOk && item.status !== 'ok') return false;
-  if (f.onlyOriginal && item.familySize > 1 && !item.familyBest) return false;
-  const q = f.q.trim().toLowerCase();
-  if (q && (item.name + ' ' + item.url + ' ' + item.type + ' ' + (item.host || '') + ' ' + (item.format || '') + ' '
-    + (item.codec || '') + ' ' + (item.title || '') + ' ' + (item.creator || '') + ' ' + (item.fontName || '') + ' '
-    + (item.kind || '') + ' ' + (item.flavor || '') + ' ' + (item.camera || '') + ' ' + (item.pageSize || '')).toLowerCase().indexOf(q) < 0) return false;
-  return true;
-}
+/* 筛选条件判断已统一到 store.js 的 matchesFilter：
+   这里原本另有一份，少比了 mime / alt / provenance / album / genre / family / docInfo / playlistInfo
+   八个字段——搜索这些字段时，增量追加的卡片会漏出来，重绘后又出现。 */
 
 /* -------------------------------------------------------------- 卡片 */
 

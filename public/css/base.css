@@ -239,4 +239,3 @@ body[data-mode="work"] .hero h1 { font-size: clamp(1.5rem, 3.4vw, 2.5rem); }
 .card:hover .shift-hint, .grid.list .card:hover .shift-hint { opacity: 1; transform: none; }
 .grid.list .card .shift-hint { right: auto; left: 8px; top: auto; bottom: 8px; }
 .tick:active { transform: scale(0.86); }
-.shift-key { font-family: var(--mono); color: var(--ink); border: 1px solid var(--line-strong); border-radius: 2px; padding: 0 4px; }
